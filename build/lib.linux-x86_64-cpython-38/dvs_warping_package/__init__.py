@@ -15,9 +15,9 @@ import numpy
 from numpy.lib.stride_tricks import as_strided
 import json
 import cv2
-# from astropy.wcs import WCS
-# import astropy.units as u
-# from skimage.color import rgb2gray
+from astropy.wcs import WCS
+import astropy.units as u
+from skimage.color import rgb2gray
 import io
 import matplotlib.cm as cm
 from matplotlib.patches import RegularPolygon, Ellipse, Circle, Polygon
@@ -27,12 +27,12 @@ import PIL.ImageDraw
 import PIL.ImageFont
 import PIL.ImageFilter
 import scipy.optimize
-# import astrometry
+import astrometry
 import logging
 from skimage.measure import label, regionprops
 from scipy.ndimage import convolve
 import typing
-# import torch
+import torch
 import yaml
 import bisect
 from scipy.signal import find_peaks
@@ -42,7 +42,7 @@ from matplotlib.colors import to_rgba
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from sklearn.neighbors import kneighbors_graph
 from sklearn.cluster import SpectralClustering
-# import hdbscan
+import hdbscan
 from sklearn.cluster import DBSCAN
 from typing import Tuple, List
 from tqdm import tqdm
@@ -57,22 +57,20 @@ from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_sco
 from math import exp, isfinite
 from scipy.linalg import expm, lstsq
 from collections import deque
-import configparser
+# from torchvision.transforms.functional import gaussian_blur
+# import cache
+# import stars
+import astropy
+from astropy.io import fits
+from astropy import units as u
+from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
+from astropy.wcs.utils import proj_plane_pixel_area
+from astropy.coordinates import SkyCoord, match_coordinates_sky
+from astropy.visualization.wcsaxes import WCSAxes
 
-# # from torchvision.transforms.functional import gaussian_blur
-# # import cache
-# # import stars
-# import astropy
-# from astropy.io import fits
-# from astropy import units as u
-# from astropy.wcs import WCS
-# from astropy.wcs.utils import proj_plane_pixel_scales
-# from astropy.wcs.utils import proj_plane_pixel_area
-# from astropy.coordinates import SkyCoord, match_coordinates_sky
-# from astropy.visualization.wcsaxes import WCSAxes
-
-# from astroquery.gaia import Gaia
-# astrometry.SolutionParameters
+from astroquery.gaia import Gaia
+astrometry.SolutionParameters
 
 petroff_colors_6 = [
     "#5790fc",
@@ -126,295 +124,6 @@ def print_message(message, color='default', style='normal'):
     print(f"{styles[style]}{colors[color]}{message}{styles['default']}")
 
 
-
-def label_events(binary_target_mask, x, y):
-    """
-    Label events if they fall within a binary pixel or its 3x3 neighbors, after vertically flipping the binary mask.
-
-    Parameters:
-    - binary_target_mask: 2D array (height, width) representing the binary mask.
-    - x, y: 1D arrays of x and y coordinates of events.
-
-    Returns:
-    - l: 1D array of labels where 1 means the event is within a pixel or its 3x3 neighbors.
-    """
-
-    l = numpy.zeros_like(x, dtype=numpy.int32)
-    height, width = binary_target_mask.shape
-
-    # Iterate through each event
-    for i in range(len(x)):
-        # Ensure the event coordinates are within the bounds of the binary mask
-        if 0 <= x[i] < width and 0 <= y[i] < height:
-            # If the corresponding pixel in the binary mask is 1, label the event as 1
-            if binary_target_mask[y[i], x[i]] == 1:
-                l[i] = 1
-    return l
-
-
-def binarize_target_frame(target_frame_norm, psf_size, psf_multiplier, extra_percentage=10):
-    """
-    Binarize the target frame by thresholding it based on the PSF area plus a user-defined extra percentage,
-    and return the coordinates of the circle that overlays the PSF area.
-    
-    Args:
-        target_frame_norm: Normalized target frame with PSF intensity values.
-        psf_size: The size of the PSF (Airy disk size).
-        psf_multiplier: The multiplier used when generating the PSF (aperture gain or intensity gain).
-        extra_percentage: The percentage of area to include outside the PSF (default is 5%).
-        
-    Returns:
-        binary_frame: Binarized target frame with 1 inside the threshold and 0 outside.
-        threshold_value: The threshold value used for binarization.
-        circle_params: Parameters of the circle overlay (center_x, center_y, radius).
-    """
-    # Flatten the normalized frame for easier manipulation
-    flattened_frame = target_frame_norm.flatten()
-    
-    # Calculate the PSF radius and area, considering the multiplier
-    psf_radius = psf_size * psf_multiplier
-    psf_area = numpy.pi * (psf_radius ** 2)
-    
-    # Add the extra percentage to the PSF area to account for background inclusion
-    total_pixels_to_include = psf_area * (1 + extra_percentage / 100)
-    
-    # Sort pixel values from highest to lowest to determine intensity levels
-    sorted_pixels = numpy.sort(flattened_frame)[::-1]
-    
-    # Find the threshold index based on the cumulative area and total pixels to include
-    cumulative_area = numpy.cumsum(sorted_pixels)
-    threshold_index = numpy.searchsorted(cumulative_area, total_pixels_to_include)
-    
-    # Ensure the threshold is valid and select the appropriate intensity value
-    threshold_value = sorted_pixels[min(threshold_index, len(sorted_pixels) - 1)]
-    
-    # Binarize the frame using the calculated threshold to select the PSF and slight background
-    binary_frame = (target_frame_norm >= threshold_value).astype(numpy.uint8)
-
-    # Find the centroid of the PSF by calculating the weighted average of pixel positions
-    y_coords, x_coords = numpy.indices(target_frame_norm.shape)
-    center_x = numpy.sum(x_coords * target_frame_norm) / numpy.sum(target_frame_norm)
-    center_y = numpy.sum(y_coords * target_frame_norm) / numpy.sum(target_frame_norm)
-    
-    # Calculate the radius of the circle based on total pixels to include
-    radius = numpy.sqrt(total_pixels_to_include / numpy.pi)
-
-    # Return the binary image and circle parameters (center_x, center_y, radius)
-    circle_params = (center_x, center_y, radius)
-    
-    return binary_frame, circle_params
-
-
-def plot_with_circle(binary_image, circle_params):
-    """
-    Plots the binary image with an overlay of a circle showing the boundary around the PSF object.
-    
-    Args:
-        binary_image: The binary image after thresholding.
-        circle_params: Parameters of the circle (center_x, center_y, radius).
-    """
-    center_x, center_y, radius = circle_params
-    
-    # Plot the binary image
-    fig, ax = plt.subplots()
-    ax.imshow(binary_image, cmap='gray')
-    
-    # Overlay the circle
-    circle = plt.Circle((center_x, center_y), radius, color='red', fill=False, linewidth=1)
-    ax.add_patch(circle)
-    
-    # Set plot details
-    ax.set_title("Binary PSF with Overlay Circle")
-    ax.axis('off')
-    plt.savefig("OUTPUT/3_target_frame_norm.png", bbox_inches='tight', dpi=300)
-    plt.close(fig)
-    # plt.show()
-    
-    
-def overlay_and_label_events(accumulated_image, binary_target_mask, x, y, alpha=64, y_offset=0):
-    """
-    Overlays the binary mask as a faint red mask (only where the mask is 1) on top of the accumulated image
-    and labels events based on whether they fall within the binary mask.
-
-    Parameters:
-    - accumulated_image: The accumulated image (e.g., from dvs_warping_package, as a NumPy array or PIL image).
-    - binary_target_mask: The binary mask indicating areas of interest (1), as a NumPy array.
-    - x, y: 1D arrays of x and y coordinates of events.
-    - alpha: Transparency level for the overlay (0-255, where 255 is fully opaque).
-
-    Returns:
-    - A tuple:
-        - A PIL image with the binary mask overlaid on the accumulated image.
-        - A 1D array `l` where events falling inside a pixel with binary mask value 1 are labeled as 1.
-    """
-    
-    accumulated_image_pil = accumulated_image
-        
-    # binary_target_mask = numpy.flipud(binary_target_mask)
-    # Convert the binary mask to an 8-bit grayscale image (0 for background, 255 for mask)
-    binary_mask = Image.fromarray(binary_target_mask.astype(numpy.uint8) * 255)  # Grayscale image (0 or 255)
-    
-    # Create a red image with transparency where the binary mask has value 1
-    red_overlay = Image.new("RGBA", binary_mask.size, (255, 0, 0, alpha))  # Red color with transparency (alpha)
-    
-    # Create a mask to apply the red overlay only where the binary mask is 1
-    binary_mask = binary_mask.convert("L")  # Ensure it's in grayscale mode (L)
-    
-    # Convert the accumulated image to RGBA for overlay compatibility
-    accumulated_image_pil = accumulated_image_pil.convert("RGBA")
-    
-    # Only paste the red overlay where the binary mask is 1
-    accumulated_image_with_overlay = accumulated_image_pil.copy()
-    accumulated_image_with_overlay.paste(red_overlay, (0, 0), mask=binary_mask)  # Paste with the binary mask as transparency
-    
-    # Now perform the horizontal flip on the events before labeling
-    
-    height, width = binary_target_mask.shape
-    
-    # Initialize label array with zeros (same size as x)
-    l = numpy.zeros_like(x, dtype=numpy.int32)
-
-    # Iterate through each event
-    for i in range(len(x)):
-        # Ensure the event coordinates are within the bounds of the binary mask
-        if 0 <= x[i] < width and 0 <= y[i] < height:
-            # If the corresponding pixel in the binary mask is white (value 1), label the event as 1
-            if binary_target_mask[y[i], x[i]] == 1:
-                l[i] = 1
-
-    return accumulated_image_with_overlay, l
-
-
-def create_binary_mask(target_frame_norm):
-    """
-    Calculate the PSF center and the bumped-up radius using the maximum threshold possible,
-    and create a new binary mask with the object at the same coordinates but with the new radius.
-    
-    Args:
-        target_frame_norm: Normalized target frame with PSF intensity values.
-        radius_increase: The percentage to bump the PSF radius.
-        
-    Returns:
-        x_center: X coordinate of the PSF center.
-        y_center: Y coordinate of the PSF center.
-        radius_high: The bumped-up radius after increasing by the user-defined percentage.
-        new_binary_image: The binary mask with the object at the same center but with the new radius.
-    """
-    # Calculate the maximum threshold (which selects all non-zero pixels)
-    max_threshold = numpy.max(target_frame_norm)/10
-    
-    # Create a binary mask based on the maximum threshold
-    binary_mask = (target_frame_norm > max_threshold).astype(numpy.uint8)
-    
-    # Find the centroid of the PSF using weighted average of pixel positions
-    y_coords, x_coords = numpy.indices(target_frame_norm.shape)
-    x_center = numpy.sum(x_coords * target_frame_norm) / numpy.sum(target_frame_norm)
-    y_center = numpy.sum(y_coords * target_frame_norm) / numpy.sum(target_frame_norm)
-    
-    # Calculate the original PSF radius (distance from center to the edge of the binary object)
-    psf_radius = numpy.sqrt(numpy.sum(binary_mask) / numpy.pi)
-    
-    # Bump the radius by the user-defined percentage
-    # radius_high = psf_radius * (1 + radius_increase / 100)
-    # radius_high = psf_radius * (1 + 20 / psf_radius)
-    radius_high = psf_radius * 1.25 # an constant increase of 25%
-    
-    
-    # Create a new binary mask with the bumped radius, keeping the same center
-    new_binary_image = numpy.zeros_like(target_frame_norm, dtype=numpy.uint8)
-    
-    # Calculate the coordinates of the pixels within the new bumped radius
-    for y in range(new_binary_image.shape[0]):
-        for x in range(new_binary_image.shape[1]):
-            if numpy.sqrt((x - x_center)**2 + (y - y_center)**2) <= radius_high:
-                new_binary_image[y, x] = 1
-    
-    return new_binary_image #x_center, y_center, radius_high, new_binary_image
-
-
-def create_binary_mask_with_psf(target_frame_norm, psf_size, psf_multiplier, radius_increase):
-    """
-    Calculate the PSF center and the bumped-up radius using the maximum threshold possible,
-    and create a new binary mask with the object at the same coordinates but with the new radius.
-    
-    Args:
-        target_frame_norm: Normalized target frame with PSF intensity values.
-        psf_size: The size of the PSF (Airy disk size).
-        psf_multiplier: The multiplier used when generating the PSF (aperture gain or intensity gain).
-        radius_increase: The percentage to bump the PSF radius (inversely proportional to the PSF size).
-        
-    Returns:
-        new_binary_image: The binary mask with the object at the same center but with the new radius.
-    """
-    # Calculate the maximum threshold (which selects all non-zero pixels)
-    max_threshold = numpy.max(target_frame_norm) / 10
-    
-    # Create a binary mask based on the maximum threshold
-    binary_mask = (target_frame_norm >= max_threshold).astype(numpy.uint8)
-    
-    # Find the centroid of the PSF using the weighted average of pixel positions
-    y_coords, x_coords = numpy.indices(target_frame_norm.shape)
-    x_center = numpy.sum(x_coords * target_frame_norm) / numpy.sum(target_frame_norm)
-    y_center = numpy.sum(y_coords * target_frame_norm) / numpy.sum(target_frame_norm)
-    
-    # Calculate the original PSF radius (distance from center to the edge of the binary object)
-    psf_radius = numpy.sqrt(numpy.sum(binary_mask) / numpy.pi)
-    
-    # Adjust the radius increase inversely proportional to the PSF size and multiplier
-    effective_radius_increase = radius_increase / (psf_size * psf_multiplier)
-    
-    # Bump the radius by the adjusted increase
-    radius_high = psf_radius * (1 + effective_radius_increase / 100)
-    
-    # Create a new binary mask with the bumped radius, keeping the same center
-    new_binary_image = numpy.zeros_like(target_frame_norm, dtype=numpy.uint8)
-    
-    # Calculate the coordinates of the pixels within the new bumped radius
-    for y in range(new_binary_image.shape[0]):
-        for x in range(new_binary_image.shape[1]):
-            if numpy.sqrt((x - x_center)**2 + (y - y_center)**2) <= radius_high:
-                new_binary_image[y, x] = 1
-    
-    return new_binary_image
-
-
-def calculate_time_constants(photon_flux_density, quantum_efficiency, electron_charge, pixel_pitch, fill_factor, Idr, tau_dark, tau_sf):
-    """
-    Computes the time constants based from photon flux density
-    
-    Parameters:
-    - photon_flux_density: The input image with the photon flux density (photon/m^2.s)
-    - quantum_efficiency: Quantum efficiency constant.
-    - q: Elementary charge constant (C).
-    - pixel_pitch: Size of a pixel (m).
-    - fill_factor: Fill factor of the photoreceptors.
-    - Idr: Dark current (A) (2D array matching the input photon_flux_density) by default 5.5fA.
-    - tau_dark: Time constant in the absence of light (s).
-    - tau_sf: Time constant of the source follower (s).
-    
-    eq:
-    Iph = η*q*Φ*p^2*ff
-
-
-    Returns:
-    - tau: Per-pixel time constants (s)
-    """
-    
-    # Step 0: Create a 2D array of the dark photocurrent
-    Idr = numpy.full(photon_flux_density.shape, Idr)
-
-    # Step 1: Compute Photocurrent I
-    I = quantum_efficiency * electron_charge * photon_flux_density * fill_factor * pixel_pitch**2
-
-    # Step 2: Compute Photoreceptor Time Constant tau_p (NOT NEEDED)
-    # denominator = numpy.maximum(I + Idr, 1e-20)  # Prevent division by zero
-    tau_pr = tau_dark * (Idr / I + Idr)
-
-    # Step 3: If tau_sf > tau_pr, use tau_pr; else, use tau_sf (Select the smallest one)
-    tau = numpy.where(tau_sf > tau_pr, tau_pr, tau_sf)
-    
-    return tau
-    
 def read_es_file(
     path: typing.Union[pathlib.Path, str]
 ) -> tuple[int, int, numpy.ndarray]:
@@ -519,7 +228,7 @@ def unwarp(warped_events: numpy.ndarray, velocity: tuple[float, float]):
 
 
 def smooth_histogram(warped_events: numpy.ndarray):
-    return dvs_warping_package_extension.smooth_histogram(warped_events)
+    return dvs_sparse_filter_extension.smooth_histogram(warped_events)
 
 def accumulate(
     sensor_size: tuple[int, int],
@@ -527,7 +236,7 @@ def accumulate(
     velocity: tuple[float, float],
 ):
     return CumulativeMap(
-        pixels=dvs_warping_package_extension.accumulate(  # type: ignore
+        pixels=dvs_sparse_filter_extension.accumulate(  # type: ignore
             sensor_size[0],
             sensor_size[1],
             events["t"].astype("<f8"),
@@ -546,7 +255,7 @@ def accumulate_timesurface(
     tau: int,
 ):
     return CumulativeMap(
-        pixels=dvs_warping_package_extension.accumulate_timesurface(  # type: ignore
+        pixels=dvs_sparse_filter_extension.accumulate_timesurface(  # type: ignore
             sensor_size[0],
             sensor_size[1],
             events["t"].astype("<f8"),
@@ -564,7 +273,7 @@ def accumulate_pixel_map(
     events: numpy.ndarray,
     velocity: tuple[float, float],
 ):
-    accumulated_pixels, event_indices_list = dvs_warping_package_extension.accumulate_pixel_map(  # type: ignore
+    accumulated_pixels, event_indices_list = dvs_sparse_filter_extension.accumulate_pixel_map(  # type: ignore
         sensor_size[0],
         sensor_size[1],
         events["t"].astype("<f8"),
@@ -592,7 +301,7 @@ def accumulate_cnt(
     velocity: tuple[float, float],
 ):
     return CumulativeMap(
-        pixels=dvs_warping_package_extension.accumulate_cnt(  # type: ignore
+        pixels=dvs_sparse_filter_extension.accumulate_cnt(  # type: ignore
             sensor_size[0],
             sensor_size[1],
             events["t"].astype("<f8"),
@@ -610,7 +319,7 @@ def accumulate_cnt_rgb(
     label: numpy.ndarray,
     velocity: tuple[float, float],
 ):
-    accumulated_pixels, label_image = dvs_warping_package_extension.accumulate_cnt_rgb(  # type: ignore
+    accumulated_pixels, label_image = dvs_sparse_filter_extension.accumulate_cnt_rgb(  # type: ignore
         sensor_size[0],
         sensor_size[1],
         events["t"].astype("<f8"),
@@ -2647,7 +2356,7 @@ def accumulate4D_torch(sensor_size, events, linear_vel, angular_vel, zoom):
     y_np = events["y"].cpu().numpy()
 
     # Get the 2D image using the C++ function
-    image_np = dvs_warping_package_extension.accumulate4D(
+    image_np = dvs_sparse_filter_extension.accumulate4D(
         sensor_size[0],
         sensor_size[1],
         t_np.astype("<f8"),
@@ -2731,121 +2440,121 @@ def remove_hot_pixels_cedric(td, std_dev_threshold):
     return td_clean
 
 
-# def interpolate_to_image(pxs, pys, dxs, dys, weights, img):
-#     """
-#     Accumulate x and y coords to an image using bilinear interpolation
-#     @param pxs Numpy array of integer typecast x coords of events
-#     @param pys Numpy array of integer typecast y coords of events
-#     @param dxs Numpy array of residual difference between x coord and int(x coord)
-#     @param dys Numpy array of residual difference between y coord and int(y coord)
-#     @returns Image
-#     From: https://github.com/TimoStoff/event_utils/blob/master/lib/representations/image.py#L102
-#     """
-#     img.index_put_((pys,   pxs  ), weights*(1.0-dxs)*(1.0-dys), accumulate=True)
-#     img.index_put_((pys,   pxs+1), weights*dxs*(1.0-dys), accumulate=True)
-#     img.index_put_((pys+1, pxs  ), weights*(1.0-dxs)*dys, accumulate=True)
-#     img.index_put_((pys+1, pxs+1), weights*dxs*dys, accumulate=True)
-#     return img
+def interpolate_to_image(pxs, pys, dxs, dys, weights, img):
+    """
+    Accumulate x and y coords to an image using bilinear interpolation
+    @param pxs Numpy array of integer typecast x coords of events
+    @param pys Numpy array of integer typecast y coords of events
+    @param dxs Numpy array of residual difference between x coord and int(x coord)
+    @param dys Numpy array of residual difference between y coord and int(y coord)
+    @returns Image
+    From: https://github.com/TimoStoff/event_utils/blob/master/lib/representations/image.py#L102
+    """
+    img.index_put_((pys,   pxs  ), weights*(1.0-dxs)*(1.0-dys), accumulate=True)
+    img.index_put_((pys,   pxs+1), weights*dxs*(1.0-dys), accumulate=True)
+    img.index_put_((pys+1, pxs  ), weights*(1.0-dxs)*dys, accumulate=True)
+    img.index_put_((pys+1, pxs+1), weights*dxs*dys, accumulate=True)
+    return img
 
 
-# def events_to_image_torch(xs, ys, ps,
-#         device=None, sensor_size=(1280, 720), clip_out_of_range=True,
-#         interpolation=None, padding=True, default=0):
-#     """
-#     Method to turn event tensor to image. Allows for bilinear interpolation.
-#     @param xs Tensor of x coords of events
-#     @param ys Tensor of y coords of events
-#     @param ps Tensor of event polarities/weights
-#     @param device The device on which the image is. If none, set to events device
-#     @param sensor_size The size of the image sensor/output image
-#     @param clip_out_of_range If the events go beyond the desired image size,
-#        clip the events to fit into the image
-#     @param interpolation Which interpolation to use. Options=None,'bilinear'
-#     @param padding If bilinear interpolation, allow padding the image by 1 to allow events to fit:
-#     @returns Event image from the events
-#     From: https://github.com/TimoStoff/event_utils/blob/master/lib/representations/image.py#L46
-#     """
-#     if device is None:
-#         device = xs.device
-#     if interpolation == 'bilinear' and padding:
-#         img_size = (sensor_size[0]+1, sensor_size[1]+1)
-#     else:
-#         img_size = list(sensor_size)
+def events_to_image_torch(xs, ys, ps,
+        device=None, sensor_size=(1280, 720), clip_out_of_range=True,
+        interpolation=None, padding=True, default=0):
+    """
+    Method to turn event tensor to image. Allows for bilinear interpolation.
+    @param xs Tensor of x coords of events
+    @param ys Tensor of y coords of events
+    @param ps Tensor of event polarities/weights
+    @param device The device on which the image is. If none, set to events device
+    @param sensor_size The size of the image sensor/output image
+    @param clip_out_of_range If the events go beyond the desired image size,
+       clip the events to fit into the image
+    @param interpolation Which interpolation to use. Options=None,'bilinear'
+    @param padding If bilinear interpolation, allow padding the image by 1 to allow events to fit:
+    @returns Event image from the events
+    From: https://github.com/TimoStoff/event_utils/blob/master/lib/representations/image.py#L46
+    """
+    if device is None:
+        device = xs.device
+    if interpolation == 'bilinear' and padding:
+        img_size = (sensor_size[0]+1, sensor_size[1]+1)
+    else:
+        img_size = list(sensor_size)
 
-#     mask = torch.ones(xs.size(), device=device)
-#     if clip_out_of_range:
-#         zero_v = torch.tensor([0.], device=device)
-#         ones_v = torch.tensor([1.], device=device)
-#         clipx = img_size[1] if interpolation is None and padding==False else img_size[1]-1
-#         clipy = img_size[0] if interpolation is None and padding==False else img_size[0]-1
-#         mask = torch.where(xs>=clipx, zero_v, ones_v)*torch.where(ys>=clipy, zero_v, ones_v)
+    mask = torch.ones(xs.size(), device=device)
+    if clip_out_of_range:
+        zero_v = torch.tensor([0.], device=device)
+        ones_v = torch.tensor([1.], device=device)
+        clipx = img_size[1] if interpolation is None and padding==False else img_size[1]-1
+        clipy = img_size[0] if interpolation is None and padding==False else img_size[0]-1
+        mask = torch.where(xs>=clipx, zero_v, ones_v)*torch.where(ys>=clipy, zero_v, ones_v)
 
-#     img = (torch.ones(img_size)*default).to(device)
-#     if interpolation == 'bilinear' and xs.dtype is not torch.long and xs.dtype is not torch.long:
-#         pxs = (xs.floor()).float()
-#         pys = (ys.floor()).float()
-#         dxs = (xs-pxs).float()
-#         dys = (ys-pys).float()
-#         pxs = (pxs*mask).long()
-#         pys = (pys*mask).long()
-#         masked_ps = ps.squeeze()*mask
-#         interpolate_to_image(pxs, pys, dxs, dys, masked_ps, img)
-#     else:
-#         if xs.dtype is not torch.long:
-#             xs = xs.long().to(device)
-#         if ys.dtype is not torch.long:
-#             ys = ys.long().to(device)
-#         try:
-#             mask = mask.long().to(device)
-#             xs, ys = xs*mask, ys*mask
-#             img.index_put_((ys, xs), ps, accumulate=True)
-#         except Exception as e:
-#             print("Unable to put tensor {} positions ({}, {}) into {}. Range = {},{}".format(
-#                 ps.shape, ys.shape, xs.shape, img.shape,  torch.max(ys), torch.max(xs)))
-#             raise e
-#     return img
+    img = (torch.ones(img_size)*default).to(device)
+    if interpolation == 'bilinear' and xs.dtype is not torch.long and xs.dtype is not torch.long:
+        pxs = (xs.floor()).float()
+        pys = (ys.floor()).float()
+        dxs = (xs-pxs).float()
+        dys = (ys-pys).float()
+        pxs = (pxs*mask).long()
+        pys = (pys*mask).long()
+        masked_ps = ps.squeeze()*mask
+        interpolate_to_image(pxs, pys, dxs, dys, masked_ps, img)
+    else:
+        if xs.dtype is not torch.long:
+            xs = xs.long().to(device)
+        if ys.dtype is not torch.long:
+            ys = ys.long().to(device)
+        try:
+            mask = mask.long().to(device)
+            xs, ys = xs*mask, ys*mask
+            img.index_put_((ys, xs), ps, accumulate=True)
+        except Exception as e:
+            print("Unable to put tensor {} positions ({}, {}) into {}. Range = {},{}".format(
+                ps.shape, ys.shape, xs.shape, img.shape,  torch.max(ys), torch.max(xs)))
+            raise e
+    return img
 
-# def events_to_image(xs, ys, ps, sensor_size=(1280, 720), interpolation=None, padding=False, meanval=False, default=0):
-#     """
-#     Place events into an image using numpy
-#     @param xs x coords of events
-#     @param ys y coords of events
-#     @param ps Event polarities/weights
-#     @param sensor_size The size of the event camera sensor
-#     @param interpolation Whether to add the events to the pixels by interpolation (values: None, 'bilinear')
-#     @param padding If true, pad the output image to include events otherwise warped off sensor
-#     @param meanval If true, divide the sum of the values by the number of events at that location
-#     @returns Event image from the input events
-#     From: https://github.com/TimoStoff/event_utils/blob/master/lib/representations/image.py#L5
-#     """
-#     img_size = (sensor_size[0]+1, sensor_size[1]+1)
-#     if interpolation == 'bilinear' and xs.dtype is not torch.long and xs.dtype is not torch.long:
-#         xt, yt, pt = torch.from_numpy(xs.astype(numpy.int16)), torch.from_numpy(ys.astype(numpy.int16)), torch.from_numpy(ps.astype(numpy.int16))
-#         xt, yt, pt = xt.float(), yt.float(), pt.float()
-#         img = events_to_image_torch(xt, yt, pt, clip_out_of_range=False, interpolation='bilinear', padding=padding)
-#         img[img==0] = default
-#         img = img.numpy()
-#         if meanval:
-#             event_count_image = events_to_image_torch(xt, yt, torch.ones_like(xt),
-#                     clip_out_of_range=True, padding=padding)
-#             event_count_image = event_count_image.numpy()
-#     else:
-#         coords = numpy.stack((xs, ys))
-#         try:
-#             abs_coords = numpy.ravel_multi_index(coords, img_size)
-#         except ValueError:
-#             print("Issue with input arrays! minx={}, maxx={}, miny={}, maxy={}, coords.shape={}, \
-#                     sum(coords)={}, sensor_size={}".format(numpy.min(xs), numpy.max(xs), numpy.min(ys), numpy.max(ys),
-#                         coords.shape, numpy.sum(coords), img_size))
-#             raise ValueError
-#         img = numpy.bincount(abs_coords, weights=ps, minlength=img_size[0]*img_size[1])
-#         img = img.reshape(img_size)
-#         if meanval:
-#             event_count_image = numpy.bincount(abs_coords, weights=numpy.ones_like(xs), minlength=img_size[0]*img_size[1])
-#             event_count_image = event_count_image.reshape(img_size)
-#     if meanval:
-#         img = numpy.divide(img, event_count_image, out=numpy.ones_like(img)*default, where=event_count_image!=0)
-#     return img[0:sensor_size[0], 0:sensor_size[1]]
+def events_to_image(xs, ys, ps, sensor_size=(1280, 720), interpolation=None, padding=False, meanval=False, default=0):
+    """
+    Place events into an image using numpy
+    @param xs x coords of events
+    @param ys y coords of events
+    @param ps Event polarities/weights
+    @param sensor_size The size of the event camera sensor
+    @param interpolation Whether to add the events to the pixels by interpolation (values: None, 'bilinear')
+    @param padding If true, pad the output image to include events otherwise warped off sensor
+    @param meanval If true, divide the sum of the values by the number of events at that location
+    @returns Event image from the input events
+    From: https://github.com/TimoStoff/event_utils/blob/master/lib/representations/image.py#L5
+    """
+    img_size = (sensor_size[0]+1, sensor_size[1]+1)
+    if interpolation == 'bilinear' and xs.dtype is not torch.long and xs.dtype is not torch.long:
+        xt, yt, pt = torch.from_numpy(xs.astype(numpy.int16)), torch.from_numpy(ys.astype(numpy.int16)), torch.from_numpy(ps.astype(numpy.int16))
+        xt, yt, pt = xt.float(), yt.float(), pt.float()
+        img = events_to_image_torch(xt, yt, pt, clip_out_of_range=False, interpolation='bilinear', padding=padding)
+        img[img==0] = default
+        img = img.numpy()
+        if meanval:
+            event_count_image = events_to_image_torch(xt, yt, torch.ones_like(xt),
+                    clip_out_of_range=True, padding=padding)
+            event_count_image = event_count_image.numpy()
+    else:
+        coords = numpy.stack((xs, ys))
+        try:
+            abs_coords = numpy.ravel_multi_index(coords, img_size)
+        except ValueError:
+            print("Issue with input arrays! minx={}, maxx={}, miny={}, maxy={}, coords.shape={}, \
+                    sum(coords)={}, sensor_size={}".format(numpy.min(xs), numpy.max(xs), numpy.min(ys), numpy.max(ys),
+                        coords.shape, numpy.sum(coords), img_size))
+            raise ValueError
+        img = numpy.bincount(abs_coords, weights=ps, minlength=img_size[0]*img_size[1])
+        img = img.reshape(img_size)
+        if meanval:
+            event_count_image = numpy.bincount(abs_coords, weights=numpy.ones_like(xs), minlength=img_size[0]*img_size[1])
+            event_count_image = event_count_image.reshape(img_size)
+    if meanval:
+        img = numpy.divide(img, event_count_image, out=numpy.ones_like(img)*default, where=event_count_image!=0)
+    return img[0:sensor_size[0], 0:sensor_size[1]]
 
 
 def hot_pixels_filter(events, PercentPixelsToRemove=0.01, minimumNumOfEventsToCheckHotNess=100 ):
@@ -3052,38 +2761,38 @@ def pool2d(A, kernel_size, stride, padding=0, pool_mode='max'):
         return A_w.mean(axis=(2, 3))
    
 
-# #detect sources in target frequency:
-# def detect_sources(warped_accumulated_frame, filtered_image_path):
-#     print('Detecting sources in image frame using masking and region props')
-#     # detect sources using region props
-#     filtered_warped_image   = warped_accumulated_frame.filter(PIL.ImageFilter.MedianFilter(9))
-#     input_img_mask          = numpy.array(filtered_warped_image.convert('L'))
-#     # filtered_image          = cv2.medianBlur(input_img_mask, 9)
-#     blurred_image           = cv2.GaussianBlur(input_img_mask, (3, 3), 0)
-#     _, thresh_image         = cv2.threshold(blurred_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-#     input_img_mask_labelled = measure.label(thresh_image)
+#detect sources in target frequency:
+def detect_sources(warped_accumulated_frame, filtered_image_path):
+    print('Detecting sources in image frame using masking and region props')
+    # detect sources using region props
+    filtered_warped_image   = warped_accumulated_frame.filter(PIL.ImageFilter.MedianFilter(9))
+    input_img_mask          = numpy.array(filtered_warped_image.convert('L'))
+    # filtered_image          = cv2.medianBlur(input_img_mask, 9)
+    blurred_image           = cv2.GaussianBlur(input_img_mask, (3, 3), 0)
+    _, thresh_image         = cv2.threshold(blurred_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    input_img_mask_labelled = measure.label(thresh_image)
     
-#     #detect sources as pixel regions covered by event mask
-#     regions                 = measure.regionprops(label_image=input_img_mask_labelled, intensity_image=thresh_image)
+    #detect sources as pixel regions covered by event mask
+    regions                 = measure.regionprops(label_image=input_img_mask_labelled, intensity_image=thresh_image)
 
-#     filtered_regions = [region for region in regions if (region['intensity_max'] * region['area']) > 1]
-#     # filtered_regions = [region for region in regions if (region.intensity_max * region.area) > 1]
+    filtered_regions = [region for region in regions if (region['intensity_max'] * region['area']) > 1]
+    # filtered_regions = [region for region in regions if (region.intensity_max * region.area) > 1]
 
-#     print(f'Removed {len(regions)-len(filtered_regions)} of {len(regions)} as single event sources with {len(filtered_regions)} sources remaining')
+    print(f'Removed {len(regions)-len(filtered_regions)} of {len(regions)} as single event sources with {len(filtered_regions)} sources remaining')
 
-#     #sort sources by the area in descending order
-#     sources = sorted(filtered_regions, key=lambda x: x['area'], reverse=True)
+    #sort sources by the area in descending order
+    sources = sorted(filtered_regions, key=lambda x: x['area'], reverse=True)
 
-#     formatted_sources = {'sources_pix':[], 'sources_astro':[]}
+    formatted_sources = {'sources_pix':[], 'sources_astro':[]}
 
-#     brightest_sources = sources[:300]
-#     brightest_source_positions = [[float(source['centroid_weighted'][0]), float(source['centroid_weighted'][1])] for source in brightest_sources]
-#     source_positions = [[float(source['centroid_weighted'][0]), float(source['centroid_weighted'][1])] for source in sources]
+    brightest_sources = sources[:300]
+    brightest_source_positions = [[float(source['centroid_weighted'][0]), float(source['centroid_weighted'][1])] for source in brightest_sources]
+    source_positions = [[float(source['centroid_weighted'][0]), float(source['centroid_weighted'][1])] for source in sources]
     
-#     print_message(f'Number of stars extracted: {len(filtered_regions)}', color='yellow', style='bold')
+    print_message(f'Number of stars extracted: {len(filtered_regions)}', color='yellow', style='bold')
 
-#     filtered_warped_image.save(filtered_image_path)
-#     return sources, source_positions, input_img_mask, filtered_warped_image, input_img_mask_labelled
+    filtered_warped_image.save(filtered_image_path)
+    return sources, source_positions, input_img_mask, filtered_warped_image, input_img_mask_labelled
 
 
 def display_img_sources(source_extraction_img_path, regions, intensity_img, img_mask, title='Detected Sources', scaling_factor=3, colour_source_overlay=False):
@@ -3117,222 +2826,222 @@ def display_img_sources(source_extraction_img_path, regions, intensity_img, img_
     intensity_img_pil.save(source_extraction_img_path, "PNG")
 
 
-# def detect_sources_cca(warped_accumulated_frame):
-#     """
-#     Detects sources in an image and filters them based on their properties.
-#     :param warped_accumulated_frame: PIL Image of the input image.
-#     :param filtered_image_path: Path where the filtered image will be saved.
-#     :return: Tuple of sources, source_positions, focus_frame_mask, filtered_warped_image, and focus_frame_mask_labelled
-#     """
-#     image_np = numpy.array(warped_accumulated_frame)
+def detect_sources_cca(warped_accumulated_frame):
+    """
+    Detects sources in an image and filters them based on their properties.
+    :param warped_accumulated_frame: PIL Image of the input image.
+    :param filtered_image_path: Path where the filtered image will be saved.
+    :return: Tuple of sources, source_positions, focus_frame_mask, filtered_warped_image, and focus_frame_mask_labelled
+    """
+    image_np = numpy.array(warped_accumulated_frame)
     
-#     # Convert to grayscale for processing
-#     if len(image_np.shape) == 3 and image_np.shape[2] == 3:
-#         gray_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-#     else:
-#         gray_image = image_np
+    # Convert to grayscale for processing
+    if len(image_np.shape) == 3 and image_np.shape[2] == 3:
+        gray_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    else:
+        gray_image = image_np
 
-#     # Apply Gaussian blur
-#     blurred_image = cv2.GaussianBlur(gray_image, (15, 15), 0) #(13,13)
+    # Apply Gaussian blur
+    blurred_image = cv2.GaussianBlur(gray_image, (15, 15), 0) #(13,13)
     
-#     # Threshold the image
-#     _, thresh_image = cv2.threshold(blurred_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Threshold the image
+    _, thresh_image = cv2.threshold(blurred_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-#     # Morphological operations
-#     kernel = numpy.ones((3, 3), numpy.uint8)
-#     closed = cv2.morphologyEx(thresh_image, cv2.MORPH_CLOSE, kernel, iterations=3)
+    # Morphological operations
+    kernel = numpy.ones((3, 3), numpy.uint8)
+    closed = cv2.morphologyEx(thresh_image, cv2.MORPH_CLOSE, kernel, iterations=3)
     
-#     # Label connected components
-#     label_image = measure.label(closed)
-#     regions = measure.regionprops(label_image=label_image, intensity_image=closed)
+    # Label connected components
+    label_image = measure.label(closed)
+    regions = measure.regionprops(label_image=label_image, intensity_image=closed)
     
-#     filtered_regions = [region for region in regions if region.area > 1]
-#     print(f'Removed {len(regions)-len(filtered_regions)} of {len(regions)} sources, {len(filtered_regions)} sources remaining')
+    filtered_regions = [region for region in regions if region.area > 1]
+    print(f'Removed {len(regions)-len(filtered_regions)} of {len(regions)} sources, {len(filtered_regions)} sources remaining')
     
-#     sources = sorted(filtered_regions, key=lambda x: x.area, reverse=True)
-#     brightest_sources = sources[:1000]
-#     brightest_source_positions = [region.centroid for region in brightest_sources]
-#     source_positions = [region.centroid for region in filtered_regions]
+    sources = sorted(filtered_regions, key=lambda x: x.area, reverse=True)
+    brightest_sources = sources[:1000]
+    brightest_source_positions = [region.centroid for region in brightest_sources]
+    source_positions = [region.centroid for region in filtered_regions]
     
-#     # Prepare to draw circles on the original image using PIL
-#     output_image = warped_accumulated_frame.copy()
-#     draw = ImageDraw.Draw(output_image)
+    # Prepare to draw circles on the original image using PIL
+    output_image = warped_accumulated_frame.copy()
+    draw = ImageDraw.Draw(output_image)
     
-#     # Draw circles on the original image using PIL
-#     for centroid in source_positions:
-#         cx, cy = int(centroid[1]), int(centroid[0])  # Swap x and y for image coordinates
-#         draw.ellipse([(cx-5, cy-5), (cx+5, cy+5)], outline=(0, 255, 0), width=3)
+    # Draw circles on the original image using PIL
+    for centroid in source_positions:
+        cx, cy = int(centroid[1]), int(centroid[0])  # Swap x and y for image coordinates
+        draw.ellipse([(cx-5, cy-5), (cx+5, cy+5)], outline=(0, 255, 0), width=3)
     
-#     # Save the modified image using PIL to maintain original format and color space
-#     # output_image.save(filtered_image_path)
-#     filtered_warped_image = output_image
+    # Save the modified image using PIL to maintain original format and color space
+    # output_image.save(filtered_image_path)
+    filtered_warped_image = output_image
     
-#     return sources, brightest_source_positions, closed, filtered_warped_image, label_image
+    return sources, brightest_source_positions, closed, filtered_warped_image, label_image
 
 
-# def cone_search_gaia(ra, dec, search_radius):
-#     # Perform a cone search for the whole field with a radius of 1 degree
-#     radius = search_radius * u.degree
-#     Gaia.ROW_LIMIT = 100000
-#     field_centre_ra = ra
-#     field_centre_dec = dec
-#     field_centre_coord = SkyCoord(ra=field_centre_ra, dec=field_centre_dec, unit=(u.deg, u.deg), frame='icrs')
-#     print(f'Cone searching GAIA for {Gaia.ROW_LIMIT} sources in radius {radius} (deg) around field centre {field_centre_ra}, {field_centre_dec}')
-#     job = Gaia.cone_search_async(coordinate=field_centre_coord, radius=radius)
-#     gaia_sources = job.get_results()
-#     return gaia_sources
+def cone_search_gaia(ra, dec, search_radius):
+    # Perform a cone search for the whole field with a radius of 1 degree
+    radius = search_radius * u.degree
+    Gaia.ROW_LIMIT = 100000
+    field_centre_ra = ra
+    field_centre_dec = dec
+    field_centre_coord = SkyCoord(ra=field_centre_ra, dec=field_centre_dec, unit=(u.deg, u.deg), frame='icrs')
+    print(f'Cone searching GAIA for {Gaia.ROW_LIMIT} sources in radius {radius} (deg) around field centre {field_centre_ra}, {field_centre_dec}')
+    job = Gaia.cone_search_async(coordinate=field_centre_coord, radius=radius)
+    gaia_sources = job.get_results()
+    return gaia_sources
 
-# def associate_sources_new(sources_calibrated, solution, wcs_calibration, gaia_sources, results_folder_method, save_fig=True):
+def associate_sources_new(sources_calibrated, solution, wcs_calibration, gaia_sources, results_folder_method, save_fig=True):
 
-#     #need to search for every source, not just the ones from the brightest sources sublist or the matching sources sublist
-#     sources_ra = [source['centroid_radec_deg'][0][0] for source in sources_calibrated['sources_astro']]
-#     sources_dec = [source['centroid_radec_deg'][0][1] for source in sources_calibrated['sources_astro']]
+    #need to search for every source, not just the ones from the brightest sources sublist or the matching sources sublist
+    sources_ra = [source['centroid_radec_deg'][0][0] for source in sources_calibrated['sources_astro']]
+    sources_dec = [source['centroid_radec_deg'][0][1] for source in sources_calibrated['sources_astro']]
 
-#     filtered_gaia_sources = []
-#     for filtered_source in gaia_sources:
-#         # for gaia_source in gaia_sources:
-#         position_pix = wcs_calibration.all_world2pix(filtered_source['ra'], filtered_source['dec'], 0) 
-#         # print(position_pix)
-#         if 0 < position_pix[0] < 1280 and 0 < position_pix[1] < 720:
-#                 filtered_gaia_sources.append(filtered_source['phot_g_mean_mag'])
+    filtered_gaia_sources = []
+    for filtered_source in gaia_sources:
+        # for gaia_source in gaia_sources:
+        position_pix = wcs_calibration.all_world2pix(filtered_source['ra'], filtered_source['dec'], 0) 
+        # print(position_pix)
+        if 0 < position_pix[0] < 1280 and 0 < position_pix[1] < 720:
+                filtered_gaia_sources.append(filtered_source['phot_g_mean_mag'])
 
-#     # Create a list of SkyCoord objects for detected source positions
-#     source_coords = SkyCoord(ra=sources_ra, dec=sources_dec, unit=(u.degree, u.degree), frame='icrs')
-#     gaia_source_coords = SkyCoord(ra=gaia_sources['ra'], dec=gaia_sources['dec'], unit=(u.deg, u.deg), frame='icrs')
-#     all_gaia_mags = [source['phot_g_mean_mag'] for source in gaia_sources]
+    # Create a list of SkyCoord objects for detected source positions
+    source_coords = SkyCoord(ra=sources_ra, dec=sources_dec, unit=(u.degree, u.degree), frame='icrs')
+    gaia_source_coords = SkyCoord(ra=gaia_sources['ra'], dec=gaia_sources['dec'], unit=(u.deg, u.deg), frame='icrs')
+    all_gaia_mags = [source['phot_g_mean_mag'] for source in gaia_sources]
     
-#     # Loop through each source and find the closest match locally
-#     match_idxs, d2d, _ = match_coordinates_sky(source_coords, gaia_source_coords, nthneighbor=1)
-#     # match_idxs, d2d, _ = match_coordinates_sky(source_coords, SkyCoord(ra=filtered_gaia_source_ra, dec=filtered_gaia_source_dec, unit=(u.deg, u.deg), frame='icrs'), nthneighbor=1)
-#     duplicate_indices = numpy.where(numpy.bincount(match_idxs) > 1)[0]
+    # Loop through each source and find the closest match locally
+    match_idxs, d2d, _ = match_coordinates_sky(source_coords, gaia_source_coords, nthneighbor=1)
+    # match_idxs, d2d, _ = match_coordinates_sky(source_coords, SkyCoord(ra=filtered_gaia_source_ra, dec=filtered_gaia_source_dec, unit=(u.deg, u.deg), frame='icrs'), nthneighbor=1)
+    duplicate_indices = numpy.where(numpy.bincount(match_idxs) > 1)[0]
 
-#     match_mags = []
+    match_mags = []
 
-#     #update all sources with associated astrophyisical characteristics of the matching astrometric source
-#     for i, match_idx in enumerate(match_idxs):
-#             closest_source = gaia_sources[match_idx]
-#             position_pix = wcs_calibration.all_world2pix(closest_source['ra'], closest_source['dec'], 0)
+    #update all sources with associated astrophyisical characteristics of the matching astrometric source
+    for i, match_idx in enumerate(match_idxs):
+            closest_source = gaia_sources[match_idx]
+            position_pix = wcs_calibration.all_world2pix(closest_source['ra'], closest_source['dec'], 0)
 
-#             sources_calibrated['sources_astro'][i]['matching_source_ra'] = closest_source['ra']
-#             sources_calibrated['sources_astro'][i]['matching_source_dec'] = closest_source['dec']
-#             sources_calibrated['sources_astro'][i]['matching_source_x'] = (position_pix[0])
-#             sources_calibrated['sources_astro'][i]['matching_source_y'] = (position_pix[1])
-#             sources_calibrated['sources_astro'][i]['match_error_arcsec'] = d2d[i].arcsecond
-#             sources_calibrated['sources_astro'][i]['match_error_pix'] = d2d[i].arcsecond / solution.best_match().scale_arcsec_per_pixel
-#             sources_calibrated['sources_astro'][i]['mag'] = closest_source['phot_g_mean_mag']
-#             # sources_calibrated['sources_astro'][i]['ID'] = closest_source['source_id']
+            sources_calibrated['sources_astro'][i]['matching_source_ra'] = closest_source['ra']
+            sources_calibrated['sources_astro'][i]['matching_source_dec'] = closest_source['dec']
+            sources_calibrated['sources_astro'][i]['matching_source_x'] = (position_pix[0])
+            sources_calibrated['sources_astro'][i]['matching_source_y'] = (position_pix[1])
+            sources_calibrated['sources_astro'][i]['match_error_arcsec'] = d2d[i].arcsecond
+            sources_calibrated['sources_astro'][i]['match_error_pix'] = d2d[i].arcsecond / solution.best_match().scale_arcsec_per_pixel
+            sources_calibrated['sources_astro'][i]['mag'] = closest_source['phot_g_mean_mag']
+            # sources_calibrated['sources_astro'][i]['ID'] = closest_source['source_id']
 
-#             match_mags.append(closest_source['phot_g_mean_mag'])
+            match_mags.append(closest_source['phot_g_mean_mag'])
 
-#             #check to make sure that the associated source is actually within the image, and store if so
-#             if 0 < position_pix[0] < 720 and 0 < position_pix[1] < 1280:
-#                 sources_calibrated['sources_astro'][i]['match_in_fov'] = True
-#             else:
-#                 sources_calibrated['sources_astro'][i]['match_in_fov'] = False
+            #check to make sure that the associated source is actually within the image, and store if so
+            if 0 < position_pix[0] < 720 and 0 < position_pix[1] < 1280:
+                sources_calibrated['sources_astro'][i]['match_in_fov'] = True
+            else:
+                sources_calibrated['sources_astro'][i]['match_in_fov'] = False
 
-#             #flag duplicates 
-#             if i in duplicate_indices:
-#                 sources_calibrated['sources_astro'][i]['duplicate'] = True
-#             else:
-#                 sources_calibrated['sources_astro'][i]['duplicate'] = False
+            #flag duplicates 
+            if i in duplicate_indices:
+                sources_calibrated['sources_astro'][i]['duplicate'] = True
+            else:
+                sources_calibrated['sources_astro'][i]['duplicate'] = False
 
-#     low_error_associated_sources =  [source['match_error_pix'] for source in sources_calibrated['sources_astro'] if source['match_error_pix'] <= 3]
-#     sources_calibrated['num_good_associated_sources_astro'] = len(low_error_associated_sources)
-#     print(f'min mag: {numpy.min(match_mags)}')
-
-
-#     filtered_mags = [source['mag'] for source in sources_calibrated['sources_astro'] if source['duplicate'] == False]
-
-#     range_of_interest = (5, 16)
-#     hist_data, bin_edges = numpy.histogram(filtered_mags, bins=100, range=range_of_interest)
-#     gaia_hist_data, _ = numpy.histogram(filtered_gaia_sources, bins=100, range=range_of_interest)
-
-#     # Find the maximum occurrence (height of the tallest bin) within the specified range
-#     max_occurrence = max(hist_data.max(), gaia_hist_data.max())
-
-#     # Plot the histograms
-#     plt.hist(filtered_mags, bins=100, alpha=0.95, edgecolor='green', histtype='step', label='Detected Sources', range=range_of_interest)
-#     plt.hist(filtered_gaia_sources, bins=100, alpha=0.95, edgecolor='orange', histtype='step', label='Catalogue Sources', range=range_of_interest)
-
-#     plt.ylabel('Occurrences')
-#     plt.xlabel('G-Band Magnitude')
-#     plt.xlim(range_of_interest)
-#     # Adjust the ylim based on the maximum occurrence, adding some padding for visual clarity
-#     plt.ylim([0, max_occurrence + max_occurrence * 0.1])  # Adding 10% padding
-
-#     plt.axvline(x=14.45, color='magenta', linestyle='--', label='Previously reported\nmag limit\n(Ralph et al. 2022)')
-#     plt.grid('on')
-#     plt.legend()
-
-#     if save_fig: plt.savefig(f'{results_folder_method}/15_histogram_of_star_magnitudes.png')
-#     # plt.show()
-#     return sources_calibrated
+    low_error_associated_sources =  [source['match_error_pix'] for source in sources_calibrated['sources_astro'] if source['match_error_pix'] <= 3]
+    sources_calibrated['num_good_associated_sources_astro'] = len(low_error_associated_sources)
+    print(f'min mag: {numpy.min(match_mags)}')
 
 
-# def astrometric_calibration_new(source_pix_positions, centre_ra, centre_dec):
+    filtered_mags = [source['mag'] for source in sources_calibrated['sources_astro'] if source['duplicate'] == False]
 
-#     #parse to astrometry with priors on pixel scale and centre, then get matches
-#     # logging.getLogger().setLevel(logging.INFO)
+    range_of_interest = (5, 16)
+    hist_data, bin_edges = numpy.histogram(filtered_mags, bins=100, range=range_of_interest)
+    gaia_hist_data, _ = numpy.histogram(filtered_gaia_sources, bins=100, range=range_of_interest)
 
-#     #number of sources to input for calibration, usually take the first 20 (brightest since sorted)
-#     number_sources_to_calibrate_from = min(100, len(source_pix_positions))
+    # Find the maximum occurrence (height of the tallest bin) within the specified range
+    max_occurrence = max(hist_data.max(), gaia_hist_data.max())
+
+    # Plot the histograms
+    plt.hist(filtered_mags, bins=100, alpha=0.95, edgecolor='green', histtype='step', label='Detected Sources', range=range_of_interest)
+    plt.hist(filtered_gaia_sources, bins=100, alpha=0.95, edgecolor='orange', histtype='step', label='Catalogue Sources', range=range_of_interest)
+
+    plt.ylabel('Occurrences')
+    plt.xlabel('G-Band Magnitude')
+    plt.xlim(range_of_interest)
+    # Adjust the ylim based on the maximum occurrence, adding some padding for visual clarity
+    plt.ylim([0, max_occurrence + max_occurrence * 0.1])  # Adding 10% padding
+
+    plt.axvline(x=14.45, color='magenta', linestyle='--', label='Previously reported\nmag limit\n(Ralph et al. 2022)')
+    plt.grid('on')
+    plt.legend()
+
+    if save_fig: plt.savefig(f'{results_folder_method}/15_histogram_of_star_magnitudes.png')
+    # plt.show()
+    return sources_calibrated
+
+
+def astrometric_calibration_new(source_pix_positions, centre_ra, centre_dec):
+
+    #parse to astrometry with priors on pixel scale and centre, then get matches
+    # logging.getLogger().setLevel(logging.INFO)
+
+    #number of sources to input for calibration, usually take the first 20 (brightest since sorted)
+    number_sources_to_calibrate_from = min(100, len(source_pix_positions))
     
-#     if number_sources_to_calibrate_from > 0:
+    if number_sources_to_calibrate_from > 0:
 
-#         solver = astrometry.Solver(
-#             astrometry.series_5200_heavy.index_files(
-#                 cache_directory="./astrometry_cache",
-#                 scales={5},
-#             )
-#         )
-#         solution = solver.solve(
-#             stars=source_pix_positions[0:number_sources_to_calibrate_from],
-#             # size_hint=None, 
-#             # position_hint=None,
-#             size_hint=astrometry.SizeHint(
-#                 lower_arcsec_per_pixel=1.0,
-#                 upper_arcsec_per_pixel=2.0,
-#             ),
-#             position_hint=astrometry.PositionHint(
-#                 ra_deg = centre_ra,
-#                 dec_deg = centre_dec,
-#                 radius_deg = 3, #1 is good, 3 also works, trying 5
-#             ),
-#             solution_parameters=astrometry.SolutionParameters(
-#             tune_up_logodds_threshold=None, # None disables tune-up (SIP distortion)
-#             output_logodds_threshold=14.0, #14.0 good, andre uses 1.0
-#             # logodds_callback=logodds_callback
-#             logodds_callback=lambda logodds_list: astrometry.Action.CONTINUE #CONTINUE or STOP
-#             )
-#         )
+        solver = astrometry.Solver(
+            astrometry.series_5200_heavy.index_files(
+                cache_directory="./astrometry_cache",
+                scales={5},
+            )
+        )
+        solution = solver.solve(
+            stars=source_pix_positions[0:number_sources_to_calibrate_from],
+            # size_hint=None, 
+            # position_hint=None,
+            size_hint=astrometry.SizeHint(
+                lower_arcsec_per_pixel=1.0,
+                upper_arcsec_per_pixel=2.0,
+            ),
+            position_hint=astrometry.PositionHint(
+                ra_deg = centre_ra,
+                dec_deg = centre_dec,
+                radius_deg = 3, #1 is good, 3 also works, trying 5
+            ),
+            solution_parameters=astrometry.SolutionParameters(
+            tune_up_logodds_threshold=None, # None disables tune-up (SIP distortion)
+            output_logodds_threshold=14.0, #14.0 good, andre uses 1.0
+            # logodds_callback=logodds_callback
+            logodds_callback=lambda logodds_list: astrometry.Action.CONTINUE #CONTINUE or STOP
+            )
+        )
         
 
-#         if solution.has_match():
-#             detected_sources = {'pos_x':[], 'pos_y':[]}
-#             print('Solution found')
-#             print(f'Centre ra, dec: {solution.best_match().center_ra_deg=}, {solution.best_match().center_dec_deg=}')
-#             print(f'Pixel scale: {solution.best_match().scale_arcsec_per_pixel=}')
-#             print(f'Number of sources found: {len(solution.best_match().stars)}')
+        if solution.has_match():
+            detected_sources = {'pos_x':[], 'pos_y':[]}
+            print('Solution found')
+            print(f'Centre ra, dec: {solution.best_match().center_ra_deg=}, {solution.best_match().center_dec_deg=}')
+            print(f'Pixel scale: {solution.best_match().scale_arcsec_per_pixel=}')
+            print(f'Number of sources found: {len(solution.best_match().stars)}')
 
-#             wcs_calibration = astropy.wcs.WCS(solution.best_match().wcs_fields)
-#             pixels = wcs_calibration.all_world2pix([[star.ra_deg, star.dec_deg] for star in solution.best_match().stars],0,)
+            wcs_calibration = astropy.wcs.WCS(solution.best_match().wcs_fields)
+            pixels = wcs_calibration.all_world2pix([[star.ra_deg, star.dec_deg] for star in solution.best_match().stars],0,)
 
-#             for idx, star in enumerate(solution.best_match().stars):
-#                 detected_sources['pos_x'].append(pixels[idx][0])
-#                 detected_sources['pos_y'].append(pixels[idx][1])
+            for idx, star in enumerate(solution.best_match().stars):
+                detected_sources['pos_x'].append(pixels[idx][0])
+                detected_sources['pos_y'].append(pixels[idx][1])
 
-#         else:
-#             print(f'\n *** No astrometric solution found ***')
-#             detected_sources = None
-#             wcs_calibration = None
+        else:
+            print(f'\n *** No astrometric solution found ***')
+            detected_sources = None
+            wcs_calibration = None
 
-#     else:
-#         print(f'\n *** No astrometric solution found, too few input sources ***')
-#         detected_sources = None
-#         wcs_calibration = None
-#         solution = None
+    else:
+        print(f'\n *** No astrometric solution found, too few input sources ***')
+        detected_sources = None
+        wcs_calibration = None
+        solution = None
 
-#     return solution, detected_sources, wcs_calibration
+    return solution, detected_sources, wcs_calibration
 
 def run_astrometry_new(sources, source_positions, centre_ra, centre_dec, gaia_sources, results_folder_method):
 
@@ -3662,103 +3371,103 @@ def format_results(sources_calibrated, source_positions, field_solved):
                            }
     return output_results
 
-# def astrometric_calibration(source_pix_positions, centre_ra, centre_dec):
+def astrometric_calibration(source_pix_positions, centre_ra, centre_dec):
 
-#     #parse to astrometry with priors on pixel scale and centre, then get matches
-#     # logging.getLogger().setLevel(logging.INFO)
+    #parse to astrometry with priors on pixel scale and centre, then get matches
+    # logging.getLogger().setLevel(logging.INFO)
 
-#     solver = astrometry.Solver(
-#         astrometry.series_5200_heavy.index_files(
-#             cache_directory="./astrometry_cache",
-#             scales={5},
-#         )
-#     )
+    solver = astrometry.Solver(
+        astrometry.series_5200_heavy.index_files(
+            cache_directory="./astrometry_cache",
+            scales={5},
+        )
+    )
 
-#     solution = solver.solve(
-#         stars=source_pix_positions[0:100],
-#         # size_hint=None, 
-#         # position_hint=None,
-#         size_hint=astrometry.SizeHint(
-#             lower_arcsec_per_pixel=1.0,
-#             upper_arcsec_per_pixel=2.0,
-#         ),
-#         position_hint=astrometry.PositionHint(
-#             ra_deg=centre_ra,
-#             dec_deg=centre_dec,
-#             radius_deg=5, #1 is good, 3 also works, trying 5
-#         ),
-#         solution_parameters=astrometry.SolutionParameters(
-#         tune_up_logodds_threshold=None, # None disables tune-up (SIP distortion)
-#         output_logodds_threshold=14.0, #14.0 good, andre uses 1.0
-#         # logodds_callback=logodds_callback
-#         logodds_callback=lambda logodds_list: astrometry.Action.STOP #CONTINUE or STOP
-#         )
-#     )
+    solution = solver.solve(
+        stars=source_pix_positions[0:100],
+        # size_hint=None, 
+        # position_hint=None,
+        size_hint=astrometry.SizeHint(
+            lower_arcsec_per_pixel=1.0,
+            upper_arcsec_per_pixel=2.0,
+        ),
+        position_hint=astrometry.PositionHint(
+            ra_deg=centre_ra,
+            dec_deg=centre_dec,
+            radius_deg=5, #1 is good, 3 also works, trying 5
+        ),
+        solution_parameters=astrometry.SolutionParameters(
+        tune_up_logodds_threshold=None, # None disables tune-up (SIP distortion)
+        output_logodds_threshold=14.0, #14.0 good, andre uses 1.0
+        # logodds_callback=logodds_callback
+        logodds_callback=lambda logodds_list: astrometry.Action.STOP #CONTINUE or STOP
+        )
+    )
     
-#     detected_sources = {'pos_x':[], 'pos_y':[]}
+    detected_sources = {'pos_x':[], 'pos_y':[]}
 
-#     if solution.has_match():
-#         print('Solution found')
-#         print(f'Centre ra, dec: {solution.best_match().center_ra_deg=}, {solution.best_match().center_dec_deg=}')
-#         print(f'Pixel scale: {solution.best_match().scale_arcsec_per_pixel=}')
-#         print_message(f'Number of astrophysical sources found: {len(solution.best_match().stars)}', color='yellow', style='bold')
-#         # print(f'Number of sources found: {len(solution.best_match().stars)}')
+    if solution.has_match():
+        print('Solution found')
+        print(f'Centre ra, dec: {solution.best_match().center_ra_deg=}, {solution.best_match().center_dec_deg=}')
+        print(f'Pixel scale: {solution.best_match().scale_arcsec_per_pixel=}')
+        print_message(f'Number of astrophysical sources found: {len(solution.best_match().stars)}', color='yellow', style='bold')
+        # print(f'Number of sources found: {len(solution.best_match().stars)}')
 
-#         wcs_calibration = astropy.wcs.WCS(solution.best_match().wcs_fields)
-#         pixels = wcs_calibration.all_world2pix([[star.ra_deg, star.dec_deg] for star in solution.best_match().stars],0,)
+        wcs_calibration = astropy.wcs.WCS(solution.best_match().wcs_fields)
+        pixels = wcs_calibration.all_world2pix([[star.ra_deg, star.dec_deg] for star in solution.best_match().stars],0,)
 
-#         for idx, star in enumerate(solution.best_match().stars):
-#             detected_sources['pos_x'].append(pixels[idx][0])
-#             detected_sources['pos_y'].append(pixels[idx][1])
+        for idx, star in enumerate(solution.best_match().stars):
+            detected_sources['pos_x'].append(pixels[idx][0])
+            detected_sources['pos_y'].append(pixels[idx][1])
 
-#     else:
-#         print_message(f'\n *** No astrometric solution found ***', color='red', style='bold')
+    else:
+        print_message(f'\n *** No astrometric solution found ***', color='red', style='bold')
 
-#     return solution, detected_sources, wcs_calibration
+    return solution, detected_sources, wcs_calibration
 
 
-# def associate_sources(sources_calibrated, solution, wcs_calibration):
-#     #need to search for every source, not just the ones from the brightest sources sublist or the matching sources sublist
-#     sources_ra = [source['centroid_radec_deg'][0][0] for source in sources_calibrated['sources_astro']]
-#     sources_dec = [source['centroid_radec_deg'][0][1] for source in sources_calibrated['sources_astro']]
+def associate_sources(sources_calibrated, solution, wcs_calibration):
+    #need to search for every source, not just the ones from the brightest sources sublist or the matching sources sublist
+    sources_ra = [source['centroid_radec_deg'][0][0] for source in sources_calibrated['sources_astro']]
+    sources_dec = [source['centroid_radec_deg'][0][1] for source in sources_calibrated['sources_astro']]
 
-#     # Create a list of SkyCoord objects for your source positions
-#     source_coords = SkyCoord(ra=sources_ra, dec=sources_dec, unit=(u.degree, u.degree), frame='icrs')
+    # Create a list of SkyCoord objects for your source positions
+    source_coords = SkyCoord(ra=sources_ra, dec=sources_dec, unit=(u.degree, u.degree), frame='icrs')
 
-#     # Perform a cone search for the whole field with a radius of 1 degree
-#     radius = 0.5 * u.degree
-#     Gaia.ROW_LIMIT = 120000
-#     field_centre_ra = solution.best_match().center_ra_deg
-#     field_centre_dec = solution.best_match().center_dec_deg
-#     field_centre_coord = SkyCoord(ra=field_centre_ra, dec=field_centre_dec, unit=(u.deg, u.deg), frame='icrs')
-#     print(f'Cone searching GAIA for {Gaia.ROW_LIMIT} sources in radius {radius} (deg) around field centre {field_centre_ra}, {field_centre_dec}')
-#     job = Gaia.cone_search_async(coordinate=field_centre_coord, radius=radius)
-#     result = job.get_results()
+    # Perform a cone search for the whole field with a radius of 1 degree
+    radius = 0.5 * u.degree
+    Gaia.ROW_LIMIT = 120000
+    field_centre_ra = solution.best_match().center_ra_deg
+    field_centre_dec = solution.best_match().center_dec_deg
+    field_centre_coord = SkyCoord(ra=field_centre_ra, dec=field_centre_dec, unit=(u.deg, u.deg), frame='icrs')
+    print(f'Cone searching GAIA for {Gaia.ROW_LIMIT} sources in radius {radius} (deg) around field centre {field_centre_ra}, {field_centre_dec}')
+    job = Gaia.cone_search_async(coordinate=field_centre_coord, radius=radius)
+    result = job.get_results()
 
-#     # Loop through each source and find the closest match locally
-#     idx, d2d, _ = match_coordinates_sky(source_coords, SkyCoord(ra=result['ra'], dec=result['dec'], unit=(u.deg, u.deg), frame='icrs'))
+    # Loop through each source and find the closest match locally
+    idx, d2d, _ = match_coordinates_sky(source_coords, SkyCoord(ra=result['ra'], dec=result['dec'], unit=(u.deg, u.deg), frame='icrs'))
 
-#     #update all sources with associated astrophyisical characteristics of the matching astrometric source
-#     for i, source_coord in enumerate(source_coords):
+    #update all sources with associated astrophyisical characteristics of the matching astrometric source
+    for i, source_coord in enumerate(source_coords):
 
-#         closest_match_idx = idx[i]
-#         closest_source = result[closest_match_idx]
-#         position_pix = wcs_calibration.all_world2pix(closest_source['ra'], closest_source['dec'], 0)
+        closest_match_idx = idx[i]
+        closest_source = result[closest_match_idx]
+        position_pix = wcs_calibration.all_world2pix(closest_source['ra'], closest_source['dec'], 0)
         
-#         sources_calibrated['sources_astro'][i]['matching_source_ra'] = closest_source['ra']
-#         sources_calibrated['sources_astro'][i]['matching_source_dec'] = closest_source['dec']
-#         sources_calibrated['sources_astro'][i]['matching_source_x'] = int(position_pix[0])
-#         sources_calibrated['sources_astro'][i]['matching_source_y'] = int(position_pix[1])
-#         sources_calibrated['sources_astro'][i]['match_error_asec'] = d2d[i].arcsecond
-#         sources_calibrated['sources_astro'][i]['match_error_pix'] = d2d[i].arcsecond / solution.best_match().scale_arcsec_per_pixel
-#         sources_calibrated['sources_astro'][i]['mag'] = closest_source['phot_g_mean_mag']
+        sources_calibrated['sources_astro'][i]['matching_source_ra'] = closest_source['ra']
+        sources_calibrated['sources_astro'][i]['matching_source_dec'] = closest_source['dec']
+        sources_calibrated['sources_astro'][i]['matching_source_x'] = int(position_pix[0])
+        sources_calibrated['sources_astro'][i]['matching_source_y'] = int(position_pix[1])
+        sources_calibrated['sources_astro'][i]['match_error_asec'] = d2d[i].arcsecond
+        sources_calibrated['sources_astro'][i]['match_error_pix'] = d2d[i].arcsecond / solution.best_match().scale_arcsec_per_pixel
+        sources_calibrated['sources_astro'][i]['mag'] = closest_source['phot_g_mean_mag']
 
-#     #we define the number of astrometrically associated sources as the number of detected sources
-#     # which are within 3 pixels, or 5.55 arcseconds of the closest associated source
-#     low_error_associated_sources =  [source['match_error_pix'] for source in sources_calibrated['sources_astro'] if source['match_error_pix'] <= 3]
-#     sources_calibrated['num_good_associated_sources_astro'] = len(low_error_associated_sources)
+    #we define the number of astrometrically associated sources as the number of detected sources
+    # which are within 3 pixels, or 5.55 arcseconds of the closest associated source
+    low_error_associated_sources =  [source['match_error_pix'] for source in sources_calibrated['sources_astro'] if source['match_error_pix'] <= 3]
+    sources_calibrated['num_good_associated_sources_astro'] = len(low_error_associated_sources)
 
-#     return sources_calibrated
+    return sources_calibrated
 
 def run_astrometry(astrometry_output, sources, events, warped_accumulated_frame, source_positions, mount_position):
 
@@ -4032,459 +3741,459 @@ def source_finder(binary_warped_image: numpy.ndarray, warped_accumulated_frame: 
     return colored_labels_image_pil, warped_accumulated_frame, stars_pixel_positions_array, stars_pixel_diameters_array
 
 
-# def source_finder_robust(warped_image_filtered, overlay_image_path):
-#     """
-#     Detect stars in an image, filtering out single-pixel noise and artifacts.
+def source_finder_robust(warped_image_filtered, overlay_image_path):
+    """
+    Detect stars in an image, filtering out single-pixel noise and artifacts.
 
-#     Parameters:
-#     - warped_image_filtered: PIL.Image.Image object of a filtered warped image.
+    Parameters:
+    - warped_image_filtered: PIL.Image.Image object of a filtered warped image.
 
-#     Returns:
-#     - A PIL.Image.Image object with detected stars marked and circled.
-#     - A list of tuples containing the center points (x, y) of each detected star.
-#     - A list of diameters for each detected star.
-#     """
-#     # Convert PIL Image to a NumPy array (OpenCV compatible)
-#     image_array = numpy.array(warped_image_filtered)
+    Returns:
+    - A PIL.Image.Image object with detected stars marked and circled.
+    - A list of tuples containing the center points (x, y) of each detected star.
+    - A list of diameters for each detected star.
+    """
+    # Convert PIL Image to a NumPy array (OpenCV compatible)
+    image_array = numpy.array(warped_image_filtered)
     
-#     # Convert the image to grayscale
-#     gray_image = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+    # Convert the image to grayscale
+    gray_image = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
 
-#     # Apply a Gaussian blur to reduce noise
-#     blurred_image = cv2.GaussianBlur(gray_image, (3, 3), 0)
+    # Apply a Gaussian blur to reduce noise
+    blurred_image = cv2.GaussianBlur(gray_image, (3, 3), 0)
 
-#     # Use cv2.threshold to create a binary image for contour detection
-#     _, thresh_image = cv2.threshold(blurred_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Use cv2.threshold to create a binary image for contour detection
+    _, thresh_image = cv2.threshold(blurred_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-#     # Find contours (potential stars)
-#     contours, _ = cv2.findContours(thresh_image, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    # Find contours (potential stars)
+    contours, _ = cv2.findContours(thresh_image, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
-#     # Filter out single-pixel contours
-#     filtered_contours = [c for c in contours if cv2.contourArea(c) > 1]
+    # Filter out single-pixel contours
+    filtered_contours = [c for c in contours if cv2.contourArea(c) > 1]
 
-#     # Initialize a copy of the image to draw the filtered contours
-#     processed_image = image_array.copy()
+    # Initialize a copy of the image to draw the filtered contours
+    processed_image = image_array.copy()
 
-#     # Initialize lists to hold center points and diameters
-#     centers = []
-#     diameters = []
+    # Initialize lists to hold center points and diameters
+    centers = []
+    diameters = []
 
-#     def get_enclosing_circle(contour):
-#         (x, y), radius = cv2.minEnclosingCircle(contour)
-#         center = (int(x), int(y))
-#         radius = int(radius)
-#         return center, radius
+    def get_enclosing_circle(contour):
+        (x, y), radius = cv2.minEnclosingCircle(contour)
+        center = (int(x), int(y))
+        radius = int(radius)
+        return center, radius
 
-#     # Draw the enclosing circle for each filtered contour and collect center points and diameters
-#     for contour in filtered_contours:
-#         center, radius = get_enclosing_circle(contour)
-#         diameter = radius * 2
-#         centers.append(center)
-#         diameters.append(diameter)
-#         cv2.circle(processed_image, center, radius, (0, 255, 0), 2)
-#         cv2.circle(processed_image, center, 2, (0, 0, 255), -1)
+    # Draw the enclosing circle for each filtered contour and collect center points and diameters
+    for contour in filtered_contours:
+        center, radius = get_enclosing_circle(contour)
+        diameter = radius * 2
+        centers.append(center)
+        diameters.append(diameter)
+        cv2.circle(processed_image, center, radius, (0, 255, 0), 2)
+        cv2.circle(processed_image, center, 2, (0, 0, 255), -1)
     
-#     star_pixel_positions = numpy.array(centers)
-#     plt.style.use("dark_background")
-#     plt.rcParams["figure.figsize"] = [20, 12]
-#     plt.rcParams["font.size"] = 16
-#     figure, subplot = plt.subplots(nrows=1, ncols=1, layout="constrained")
-#     accumulated_frame_array = numpy.array(warped_image_filtered)
-#     subplot.imshow(accumulated_frame_array, cmap='gray', origin='lower')
-#     subplot.scatter(star_pixel_positions[:, 0], star_pixel_positions[:, 1], s=550, marker="o", facecolors="none", edgecolors='red', linewidths=2, label='Source finder')
+    star_pixel_positions = numpy.array(centers)
+    plt.style.use("dark_background")
+    plt.rcParams["figure.figsize"] = [20, 12]
+    plt.rcParams["font.size"] = 16
+    figure, subplot = plt.subplots(nrows=1, ncols=1, layout="constrained")
+    accumulated_frame_array = numpy.array(warped_image_filtered)
+    subplot.imshow(accumulated_frame_array, cmap='gray', origin='lower')
+    subplot.scatter(star_pixel_positions[:, 0], star_pixel_positions[:, 1], s=550, marker="o", facecolors="none", edgecolors='red', linewidths=2, label='Source finder')
 
-#     plt.savefig(overlay_image_path)
-#     plt.close(figure)
-#     # Convert the processed NumPy array back to a PIL Image
-#     processed_image_pil = Image.fromarray(processed_image)
-#     # print_message(f"Total stars detected: {len(radius)}", color='yellow', style='bold')
-#     im_flip = ImageOps.flip(processed_image_pil)
-#     return im_flip, numpy.array(centers), numpy.array(diameters)
-
-
-# def stars_clustering(events, method="spectral_clustering", neighbors=30, opt_clusters=20, min_cluster_size=400, eps=10, min_samples=150):
-#     pol = events["on"]
-#     ts = events["t"] / 1e6
-#     x = events["x"]
-#     y = events["y"]
-#     ALL = len(pol)
-#     selected_events = numpy.array([y, x, ts * 0.0001, pol * 0]).T
-#     adMat_cleaned = kneighbors_graph(selected_events, n_neighbors=neighbors)
-#     if method == "spectral_clustering":
-#         clustering = SpectralClustering(n_clusters=opt_clusters, random_state=0,
-#                                         affinity='precomputed_nearest_neighbors',
-#                                         n_neighbors=neighbors, assign_labels='kmeans',
-#                                         n_jobs=-1).fit_predict(adMat_cleaned)
-#     elif method == "dbscan":
-#         clusterer = DBSCAN(eps=eps, min_samples=min_samples)
-#         clusterer.fit(selected_events)
-#         clustering = clusterer.labels_
-#     elif method == "hdbscan":
-#         clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, gen_min_span_tree=True)
-#         clusterer.fit(selected_events)
-#         clustering = clusterer.labels_
-#     else:
-#         raise ValueError("Invalid clustering method")
-#     return clustering
+    plt.savefig(overlay_image_path)
+    plt.close(figure)
+    # Convert the processed NumPy array back to a PIL Image
+    processed_image_pil = Image.fromarray(processed_image)
+    # print_message(f"Total stars detected: {len(radius)}", color='yellow', style='bold')
+    im_flip = ImageOps.flip(processed_image_pil)
+    return im_flip, numpy.array(centers), numpy.array(diameters)
 
 
-# def astrometry_fit(stars_pixel_positions, stars_pixel_diameters, metadata, slice):
-#     # Set logging level to INFO to see astrometry process details
-#     logging.getLogger().setLevel(logging.INFO)
+def stars_clustering(events, method="spectral_clustering", neighbors=30, opt_clusters=20, min_cluster_size=400, eps=10, min_samples=150):
+    pol = events["on"]
+    ts = events["t"] / 1e6
+    x = events["x"]
+    y = events["y"]
+    ALL = len(pol)
+    selected_events = numpy.array([y, x, ts * 0.0001, pol * 0]).T
+    adMat_cleaned = kneighbors_graph(selected_events, n_neighbors=neighbors)
+    if method == "spectral_clustering":
+        clustering = SpectralClustering(n_clusters=opt_clusters, random_state=0,
+                                        affinity='precomputed_nearest_neighbors',
+                                        n_neighbors=neighbors, assign_labels='kmeans',
+                                        n_jobs=-1).fit_predict(adMat_cleaned)
+    elif method == "dbscan":
+        clusterer = DBSCAN(eps=eps, min_samples=min_samples)
+        clusterer.fit(selected_events)
+        clustering = clusterer.labels_
+    elif method == "hdbscan":
+        clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, gen_min_span_tree=True)
+        clusterer.fit(selected_events)
+        clustering = clusterer.labels_
+    else:
+        raise ValueError("Invalid clustering method")
+    return clustering
 
-#     if slice:
-#         sorted_indices = numpy.argsort(stars_pixel_diameters)[::-1]
-#         slice_length   = int(numpy.ceil(len(stars_pixel_diameters) / 2))
 
-#         sorted_diameters_sliced = stars_pixel_diameters[sorted_indices][:slice_length]
-#         sorted_positions_sliced = stars_pixel_positions[sorted_indices][:slice_length]
-#     else:
-#         sorted_indices = numpy.argsort(stars_pixel_diameters)[::-1]
-#         sorted_positions_sliced = stars_pixel_positions[sorted_indices]
-#         sorted_positions_sliced = sorted_positions_sliced
+def astrometry_fit(stars_pixel_positions, stars_pixel_diameters, metadata, slice):
+    # Set logging level to INFO to see astrometry process details
+    logging.getLogger().setLevel(logging.INFO)
+
+    if slice:
+        sorted_indices = numpy.argsort(stars_pixel_diameters)[::-1]
+        slice_length   = int(numpy.ceil(len(stars_pixel_diameters) / 2))
+
+        sorted_diameters_sliced = stars_pixel_diameters[sorted_indices][:slice_length]
+        sorted_positions_sliced = stars_pixel_positions[sorted_indices][:slice_length]
+    else:
+        sorted_indices = numpy.argsort(stars_pixel_diameters)[::-1]
+        sorted_positions_sliced = stars_pixel_positions[sorted_indices]
+        sorted_positions_sliced = sorted_positions_sliced
     
-#     # Initialize the astrometry solver with index files
-#     solver = astrometry.Solver(
-#         astrometry.series_5200_heavy.index_files(
-#             cache_directory="astrometry_cache",
-#             scales={4},
-#         )
-#     )
-#     # Solve the astrometry using the provided star center coordinates
-#     solution = solver.solve(
-#         stars=sorted_positions_sliced,
-#         size_hint=astrometry.SizeHint(
-#         lower_arcsec_per_pixel=1.0,
-#         upper_arcsec_per_pixel=3.0,
-#     ),
-#         position_hint=astrometry.PositionHint(
-#         ra_deg=metadata["ra"],
-#         dec_deg=metadata["dec"],
-#         radius_deg=1,
-#     ),
-#         solution_parameters=astrometry.SolutionParameters(),
-#     )
+    # Initialize the astrometry solver with index files
+    solver = astrometry.Solver(
+        astrometry.series_5200_heavy.index_files(
+            cache_directory="astrometry_cache",
+            scales={4},
+        )
+    )
+    # Solve the astrometry using the provided star center coordinates
+    solution = solver.solve(
+        stars=sorted_positions_sliced,
+        size_hint=astrometry.SizeHint(
+        lower_arcsec_per_pixel=1.0,
+        upper_arcsec_per_pixel=3.0,
+    ),
+        position_hint=astrometry.PositionHint(
+        ra_deg=metadata["ra"],
+        dec_deg=metadata["dec"],
+        radius_deg=1,
+    ),
+        solution_parameters=astrometry.SolutionParameters(),
+    )
     
-#     # Ensure that a match has been found
-#     assert solution.has_match()
+    # Ensure that a match has been found
+    assert solution.has_match()
 
-#     return solution
-
-
-# def astrometry_fit_with_gaia(observation_time, warped_image, stars_pixel_positions, stars_pixel_diameters, metadata, slice):
-#     # Set logging level to INFO to see astrometry process details
-#     logging.getLogger().setLevel(logging.INFO)
-
-#     if slice:
-#         sorted_indices = numpy.argsort(stars_pixel_diameters)[::-1]
-#         slice_length   = int(numpy.ceil(len(stars_pixel_diameters) / 2))
-
-#         sorted_diameters_sliced = stars_pixel_diameters[sorted_indices][:slice_length]
-#         sorted_positions_sliced = stars_pixel_positions[sorted_indices][:slice_length]
-#     else:
-#         sorted_indices = numpy.argsort(stars_pixel_diameters)[::-1]
-#         sorted_positions_reordered = stars_pixel_positions[sorted_indices]
-#         sorted_positions_sliced = sorted_positions_reordered
-
-#     # Initialize the astrometry solver with index files
-#     solver = astrometry.Solver(
-#         astrometry.series_5200_heavy.index_files(
-#             cache_directory="astrometry_cache",
-#             scales={4,5,6},
-#         )
-#     )
-#     solution = cache.load(
-#         "astrometry",
-#         lambda: solver.solve(
-#             stars=sorted_positions_sliced,
-#             size_hint=astrometry.SizeHint(
-#             lower_arcsec_per_pixel=1.0,
-#             upper_arcsec_per_pixel=3.0,
-#             ),
-#             position_hint=astrometry.PositionHint(
-#             ra_deg=metadata["ra"],
-#             dec_deg=metadata["dec"],
-#             radius_deg=1,
-#             ),
-#             solution_parameters=astrometry.SolutionParameters(
-#                 sip_order=0,
-#                 tune_up_logodds_threshold=None,
-#                 logodds_callback=lambda logodds_list: (
-#                     astrometry.Action.STOP
-#                     if logodds_list[0] > 100.0
-#                     else astrometry.Action.CONTINUE
-#                 ),
-#             ),
-#         ),
-#     )
-#     match = solution.best_match()
-
-#     # download stars from Gaia
-#     gaia_stars = stars.gaia(
-#         center_ra_deg=match.center_ra_deg,
-#         center_dec_deg=match.center_dec_deg,
-#         radius=numpy.hypot(
-#             warped_image.pixels.shape[0], warped_image.pixels.shape[1]
-#         )
-#         * match.scale_arcsec_per_pixel
-#         / 3600.0,
-#         cache_key="gaia",
-#         observation_time=observation_time,
-#     )
-
-#     if len(sorted_positions_sliced) == 0:
-#         tweaked_wcs = match.astropy_wcs()
-#     else:
-#         tweaked_wcs = cache.load(
-#                 "tweaked_wcs",
-#                 lambda: stars.tweak_wcs(
-#                     accumulated_frame=warped_image,
-#                     initial_wcs=match.astropy_wcs(),
-#                     gaia_stars=gaia_stars[gaia_stars["phot_g_mean_mag"] < 15],
-#                     stars_pixel_positions=sorted_positions_sliced,
-#                 ),
-#             )
-
-#     return tweaked_wcs, gaia_stars
+    return solution
 
 
-# def astrometry_overlay(output_path, solution, colored_labels_image_pil):
-#     # Convert PIL Image to a format that can be used with Matplotlib
-#     img_buffer = io.BytesIO()
-#     colored_labels_image_pil.save(img_buffer, format='PNG')
-#     img_buffer.seek(0)
-#     img_data = plt.imread(img_buffer)
+def astrometry_fit_with_gaia(observation_time, warped_image, stars_pixel_positions, stars_pixel_diameters, metadata, slice):
+    # Set logging level to INFO to see astrometry process details
+    logging.getLogger().setLevel(logging.INFO)
 
-#     # Setup the plot with WCS projection
-#     match = solution.best_match()
-#     wcs = WCS(match.wcs_fields)
-#     fig, ax = plt.subplots(subplot_kw={'projection': wcs})
-#     ax.imshow(img_data, origin='lower')
+    if slice:
+        sorted_indices = numpy.argsort(stars_pixel_diameters)[::-1]
+        slice_length   = int(numpy.ceil(len(stars_pixel_diameters) / 2))
 
-#     # Convert star positions from RA/Dec to pixels
-#     stars = wcs.all_world2pix([[star.ra_deg, star.dec_deg] for star in match.stars], 0)
+        sorted_diameters_sliced = stars_pixel_diameters[sorted_indices][:slice_length]
+        sorted_positions_sliced = stars_pixel_positions[sorted_indices][:slice_length]
+    else:
+        sorted_indices = numpy.argsort(stars_pixel_diameters)[::-1]
+        sorted_positions_reordered = stars_pixel_positions[sorted_indices]
+        sorted_positions_sliced = sorted_positions_reordered
 
-#     # Retrieve and scale star magnitudes
-#     magnitudes = numpy.array([star.metadata["mag"] for star in match.stars])
-#     scaled_magnitudes = 1.0 - (magnitudes - magnitudes.min()) / (magnitudes.max() - magnitudes.min())
-#     sizes = scaled_magnitudes * 1000  # Adjust the scaling factor as needed
+    # Initialize the astrometry solver with index files
+    solver = astrometry.Solver(
+        astrometry.series_5200_heavy.index_files(
+            cache_directory="astrometry_cache",
+            scales={4,5,6},
+        )
+    )
+    solution = cache.load(
+        "astrometry",
+        lambda: solver.solve(
+            stars=sorted_positions_sliced,
+            size_hint=astrometry.SizeHint(
+            lower_arcsec_per_pixel=1.0,
+            upper_arcsec_per_pixel=3.0,
+            ),
+            position_hint=astrometry.PositionHint(
+            ra_deg=metadata["ra"],
+            dec_deg=metadata["dec"],
+            radius_deg=1,
+            ),
+            solution_parameters=astrometry.SolutionParameters(
+                sip_order=0,
+                tune_up_logodds_threshold=None,
+                logodds_callback=lambda logodds_list: (
+                    astrometry.Action.STOP
+                    if logodds_list[0] > 100.0
+                    else astrometry.Action.CONTINUE
+                ),
+            ),
+        ),
+    )
+    match = solution.best_match()
 
-#     # Plot hexagons for stars
-#     for (x, y), size in zip(stars, sizes):
-#         hexagon = RegularPolygon((x, y), numVertices=6, radius=size**0.5, orientation=0, 
-#                                  facecolor='none', edgecolor='white', linewidth=1.5, transform=ax.get_transform('pixel'))
-#         ax.add_patch(hexagon)
+    # download stars from Gaia
+    gaia_stars = stars.gaia(
+        center_ra_deg=match.center_ra_deg,
+        center_dec_deg=match.center_dec_deg,
+        radius=numpy.hypot(
+            warped_image.pixels.shape[0], warped_image.pixels.shape[1]
+        )
+        * match.scale_arcsec_per_pixel
+        / 3600.0,
+        cache_key="gaia",
+        observation_time=observation_time,
+    )
 
-#     # Calculate and plot grid lines for RA and DEC
-#     ra = numpy.arange(int(match.center_ra_deg - 1), int(match.center_ra_deg + 1), 1) * u.deg
-#     dec = numpy.arange(int(match.center_dec_deg - 1), int(match.center_dec_deg + 1), 1) * u.deg
-#     ra_grid, dec_grid = numpy.meshgrid(ra, dec)
-#     ax.coords.grid(True, color='blue', ls='solid', alpha=1.0)
+    if len(sorted_positions_sliced) == 0:
+        tweaked_wcs = match.astropy_wcs()
+    else:
+        tweaked_wcs = cache.load(
+                "tweaked_wcs",
+                lambda: stars.tweak_wcs(
+                    accumulated_frame=warped_image,
+                    initial_wcs=match.astropy_wcs(),
+                    gaia_stars=gaia_stars[gaia_stars["phot_g_mean_mag"] < 15],
+                    stars_pixel_positions=sorted_positions_sliced,
+                ),
+            )
 
-#     ax.set_xlim(0, img_data.shape[1])
-#     ax.set_ylim(0, img_data.shape[0])
-
-#     plt.xlabel('Right Ascension')
-#     plt.ylabel('Declination')
-#     fig.savefig(output_path, dpi=100)
-#     return stars
+    return tweaked_wcs, gaia_stars
 
 
-# def gaia_stars_processing(accumulated_frame, tweaked_wcs, gaia_stars):
-#     # Convert Gaia star positions from celestial coordinates to pixel coordinates
-#     gaia_pixel_positions = tweaked_wcs.all_world2pix(numpy.array([gaia_stars["ra"], gaia_stars["dec"]]).transpose(), 0)
-#     rounded_gaia_pixel_positions = numpy.round(gaia_pixel_positions).astype(numpy.uint16)
-#     accumulated_frame_array = numpy.array(accumulated_frame)
+def astrometry_overlay(output_path, solution, colored_labels_image_pil):
+    # Convert PIL Image to a format that can be used with Matplotlib
+    img_buffer = io.BytesIO()
+    colored_labels_image_pil.save(img_buffer, format='PNG')
+    img_buffer.seek(0)
+    img_data = plt.imread(img_buffer)
+
+    # Setup the plot with WCS projection
+    match = solution.best_match()
+    wcs = WCS(match.wcs_fields)
+    fig, ax = plt.subplots(subplot_kw={'projection': wcs})
+    ax.imshow(img_data, origin='lower')
+
+    # Convert star positions from RA/Dec to pixels
+    stars = wcs.all_world2pix([[star.ra_deg, star.dec_deg] for star in match.stars], 0)
+
+    # Retrieve and scale star magnitudes
+    magnitudes = numpy.array([star.metadata["mag"] for star in match.stars])
+    scaled_magnitudes = 1.0 - (magnitudes - magnitudes.min()) / (magnitudes.max() - magnitudes.min())
+    sizes = scaled_magnitudes * 1000  # Adjust the scaling factor as needed
+
+    # Plot hexagons for stars
+    for (x, y), size in zip(stars, sizes):
+        hexagon = RegularPolygon((x, y), numVertices=6, radius=size**0.5, orientation=0, 
+                                 facecolor='none', edgecolor='white', linewidth=1.5, transform=ax.get_transform('pixel'))
+        ax.add_patch(hexagon)
+
+    # Calculate and plot grid lines for RA and DEC
+    ra = numpy.arange(int(match.center_ra_deg - 1), int(match.center_ra_deg + 1), 1) * u.deg
+    dec = numpy.arange(int(match.center_dec_deg - 1), int(match.center_dec_deg + 1), 1) * u.deg
+    ra_grid, dec_grid = numpy.meshgrid(ra, dec)
+    ax.coords.grid(True, color='blue', ls='solid', alpha=1.0)
+
+    ax.set_xlim(0, img_data.shape[1])
+    ax.set_ylim(0, img_data.shape[0])
+
+    plt.xlabel('Right Ascension')
+    plt.ylabel('Declination')
+    fig.savefig(output_path, dpi=100)
+    return stars
+
+
+def gaia_stars_processing(accumulated_frame, tweaked_wcs, gaia_stars):
+    # Convert Gaia star positions from celestial coordinates to pixel coordinates
+    gaia_pixel_positions = tweaked_wcs.all_world2pix(numpy.array([gaia_stars["ra"], gaia_stars["dec"]]).transpose(), 0)
+    rounded_gaia_pixel_positions = numpy.round(gaia_pixel_positions).astype(numpy.uint16)
+    accumulated_frame_array = numpy.array(accumulated_frame)
     
-#     # Apply mask to filter out positions outside the image boundaries
-#     gaia_base_mask = numpy.logical_and.reduce((
-#         rounded_gaia_pixel_positions[:, 0] >= 0,
-#         rounded_gaia_pixel_positions[:, 1] >= 0,
-#         rounded_gaia_pixel_positions[:, 0] < accumulated_frame_array.shape[1],
-#         rounded_gaia_pixel_positions[:, 1] < accumulated_frame_array.shape[0],
-#     ))
+    # Apply mask to filter out positions outside the image boundaries
+    gaia_base_mask = numpy.logical_and.reduce((
+        rounded_gaia_pixel_positions[:, 0] >= 0,
+        rounded_gaia_pixel_positions[:, 1] >= 0,
+        rounded_gaia_pixel_positions[:, 0] < accumulated_frame_array.shape[1],
+        rounded_gaia_pixel_positions[:, 1] < accumulated_frame_array.shape[0],
+    ))
     
-#     # Apply the base mask to pixel and world coordinates
-#     gaia_pixel_positions = gaia_pixel_positions[gaia_base_mask]
-#     gaia_world_positions = numpy.array([gaia_stars["ra"], gaia_stars["dec"]]).transpose()[gaia_base_mask]
-#     rounded_gaia_pixel_positions = rounded_gaia_pixel_positions[gaia_base_mask]
+    # Apply the base mask to pixel and world coordinates
+    gaia_pixel_positions = gaia_pixel_positions[gaia_base_mask]
+    gaia_world_positions = numpy.array([gaia_stars["ra"], gaia_stars["dec"]]).transpose()[gaia_base_mask]
+    rounded_gaia_pixel_positions = rounded_gaia_pixel_positions[gaia_base_mask]
     
-#     # Assuming a simple threshold for and_mask creation to filter valid Gaia positions
-#     # This part might need to be adjusted based on the specific use case
-#     and_mask = accumulated_frame_array[:,:,0] > 0 # Adjust according to the actual condition
-#     gaia_mask = and_mask[rounded_gaia_pixel_positions[:, 1], rounded_gaia_pixel_positions[:, 0]]
+    # Assuming a simple threshold for and_mask creation to filter valid Gaia positions
+    # This part might need to be adjusted based on the specific use case
+    and_mask = accumulated_frame_array[:,:,0] > 0 # Adjust according to the actual condition
+    gaia_mask = and_mask[rounded_gaia_pixel_positions[:, 1], rounded_gaia_pixel_positions[:, 0]]
     
-#     # Apply the additional gaia_mask
-#     gaia_pixel_positions = gaia_pixel_positions[gaia_mask]
-#     gaia_world_positions = gaia_world_positions[gaia_mask]
-#     gaia_magnitudes = gaia_stars["phot_g_mean_mag"][gaia_base_mask][gaia_mask]
+    # Apply the additional gaia_mask
+    gaia_pixel_positions = gaia_pixel_positions[gaia_mask]
+    gaia_world_positions = gaia_world_positions[gaia_mask]
+    gaia_magnitudes = gaia_stars["phot_g_mean_mag"][gaia_base_mask][gaia_mask]
 
-#     return gaia_pixel_positions, gaia_world_positions, gaia_magnitudes
+    return gaia_pixel_positions, gaia_world_positions, gaia_magnitudes
 
 
-# def astrometry_overlay_with_gaia(accumulated_frame, stars_pixel_positions, tweaked_wcs, gaia_stars, petroff_colors_6, astrometry_gaia_path):
-#     """
-#     Visualizes the tweaked WCS on the accumulated image by plotting Gaia stars and detected stars
-#     over the accumulated frame.
-#     """
-#     # Apply styling for visualization
-#     matplotlib.style.use("dark_background")
-#     matplotlib.rcParams["figure.figsize"] = [20, 12]
-#     matplotlib.rcParams["font.size"] = 16
+def astrometry_overlay_with_gaia(accumulated_frame, stars_pixel_positions, tweaked_wcs, gaia_stars, petroff_colors_6, astrometry_gaia_path):
+    """
+    Visualizes the tweaked WCS on the accumulated image by plotting Gaia stars and detected stars
+    over the accumulated frame.
+    """
+    # Apply styling for visualization
+    matplotlib.style.use("dark_background")
+    matplotlib.rcParams["figure.figsize"] = [20, 12]
+    matplotlib.rcParams["font.size"] = 16
     
-#     # Create figure and subplot
-#     figure, subplot = plt.subplots(nrows=1, ncols=1, layout="constrained")
+    # Create figure and subplot
+    figure, subplot = plt.subplots(nrows=1, ncols=1, layout="constrained")
 
-#     # Display the accumulated frame
-#     # Convert the PIL image to a NumPy array for display
-#     accumulated_frame_array = numpy.array(accumulated_frame)
-#     subplot.imshow(accumulated_frame_array, cmap='gray', origin='lower')
+    # Display the accumulated frame
+    # Convert the PIL image to a NumPy array for display
+    accumulated_frame_array = numpy.array(accumulated_frame)
+    subplot.imshow(accumulated_frame_array, cmap='gray', origin='lower')
 
-#     gaia_pixel_positions, gaia_world_positions, gaia_magnitudes = gaia_stars_processing(accumulated_frame_array, tweaked_wcs,gaia_stars)
+    gaia_pixel_positions, gaia_world_positions, gaia_magnitudes = gaia_stars_processing(accumulated_frame_array, tweaked_wcs,gaia_stars)
 
-#     # Plot Gaia stars with vertically flipped positions
-#     if len(gaia_magnitudes) > 0:
-#         subplot.scatter(gaia_pixel_positions[:, 0], gaia_pixel_positions[:,1], s=(gaia_magnitudes.max() - gaia_magnitudes) * 4, c=petroff_colors_6[0], label='Gaia Stars')
+    # Plot Gaia stars with vertically flipped positions
+    if len(gaia_magnitudes) > 0:
+        subplot.scatter(gaia_pixel_positions[:, 0], gaia_pixel_positions[:,1], s=(gaia_magnitudes.max() - gaia_magnitudes) * 4, c=petroff_colors_6[0], label='Gaia Stars')
 
-#     # # # Plot additional solution data
-#     # # if solution:
-#     # #     match = solution.best_match()
-#     # #     wcs = WCS(match.wcs_fields)
+    # # # Plot additional solution data
+    # # if solution:
+    # #     match = solution.best_match()
+    # #     wcs = WCS(match.wcs_fields)
         
-#     # #     # Assuming match.stars contains RA and Dec for each star
-#     # #     stars = wcs.all_world2pix([[star.ra_deg, star.dec_deg] for star in match.stars], 0)
+    # #     # Assuming match.stars contains RA and Dec for each star
+    # #     stars = wcs.all_world2pix([[star.ra_deg, star.dec_deg] for star in match.stars], 0)
         
-#     # #     # Plot hexagons for stars from the solution
-#     # #     for (x, y) in stars:
-#     # #         hexagon = RegularPolygon((x, y), numVertices=6, radius=10, orientation=0,
-#     # #                                  facecolor='none', edgecolor='white', linewidth=1.5)
-#     # #         subplot.add_patch(hexagon)
+    # #     # Plot hexagons for stars from the solution
+    # #     for (x, y) in stars:
+    # #         hexagon = RegularPolygon((x, y), numVertices=6, radius=10, orientation=0,
+    # #                                  facecolor='none', edgecolor='white', linewidth=1.5)
+    # #         subplot.add_patch(hexagon)
 
-#     # # Plot detected stars
-#     # if len(stars_pixel_positions) > 0:
-#     #     subplot.scatter(stars_pixel_positions[:, 0], stars_pixel_positions[:, 1], s=550, marker="o", facecolors="none", edgecolors='red', linewidths=2, label='Source finder')
+    # # Plot detected stars
+    # if len(stars_pixel_positions) > 0:
+    #     subplot.scatter(stars_pixel_positions[:, 0], stars_pixel_positions[:, 1], s=550, marker="o", facecolors="none", edgecolors='red', linewidths=2, label='Source finder')
     
-#     # Save the figure
-#     figure.savefig(astrometry_gaia_path)
-#     plt.close(figure)
+    # Save the figure
+    figure.savefig(astrometry_gaia_path)
+    plt.close(figure)
 
 
 
-# def evaluate_astrometry(accumulated_frame, astrometry_stars, tweaked_wcs, gaia_stars, stars_pixel_positions, petroff_colors_6, astrometry_gaia_mag_path, gaia_matches_path, astrometry_final, tolerance=15.0):
-#     matplotlib.style.use("default")
-#     matplotlib.rcParams["figure.figsize"] = [16, 10]
-#     matplotlib.rcParams["font.size"] = 20
-#     figure, subplot = matplotlib.pyplot.subplots(nrows=1, ncols=1, layout="constrained")
-#     window_size = 20
-#     window = scipy.signal.windows.hamming(window_size * 2 + 1)
-#     window /= numpy.sum(window)
+def evaluate_astrometry(accumulated_frame, astrometry_stars, tweaked_wcs, gaia_stars, stars_pixel_positions, petroff_colors_6, astrometry_gaia_mag_path, gaia_matches_path, astrometry_final, tolerance=15.0):
+    matplotlib.style.use("default")
+    matplotlib.rcParams["figure.figsize"] = [16, 10]
+    matplotlib.rcParams["font.size"] = 20
+    figure, subplot = matplotlib.pyplot.subplots(nrows=1, ncols=1, layout="constrained")
+    window_size = 20
+    window = scipy.signal.windows.hamming(window_size * 2 + 1)
+    window /= numpy.sum(window)
 
-#     gaia_pixel_positions, gaia_world_positions, gaia_magnitudes = gaia_stars_processing(accumulated_frame, tweaked_wcs, gaia_stars)
+    gaia_pixel_positions, gaia_world_positions, gaia_magnitudes = gaia_stars_processing(accumulated_frame, tweaked_wcs, gaia_stars)
 
-#     true_positives = numpy.zeros(len(gaia_pixel_positions), dtype=numpy.float64)
-#     match_distances = numpy.full(len(gaia_pixel_positions), numpy.nan, dtype=numpy.float64)
-#     matched_star_positions = []
-#     true_positive_counter = 0
-#     all_matching_data = []
-#     for index, gaia_pixel_position in enumerate(gaia_pixel_positions):
-#         if len(stars_pixel_positions) == 0:
-#             continue
-#         distances = numpy.hypot(stars_pixel_positions[:, 0] - gaia_pixel_position[0], stars_pixel_positions[:, 1] - gaia_pixel_position[1])
-#         closest = numpy.argmin(distances)
-#         if distances[closest] <= tolerance:  # Tolerance for match
-#             # stars_pixel_positions = numpy.delete(stars_pixel_positions, closest, axis=0)
-#             true_positives[index] = 1.0
-#             match_distances[index] = distances[closest]
-#             matched_star_positions.append(stars_pixel_positions[closest])
-#             all_matching_data.append([stars_pixel_positions[closest][0],stars_pixel_positions[closest][1],gaia_pixel_position[0],gaia_pixel_position[1],gaia_magnitudes[closest]])
-#             true_positive_counter+=1
+    true_positives = numpy.zeros(len(gaia_pixel_positions), dtype=numpy.float64)
+    match_distances = numpy.full(len(gaia_pixel_positions), numpy.nan, dtype=numpy.float64)
+    matched_star_positions = []
+    true_positive_counter = 0
+    all_matching_data = []
+    for index, gaia_pixel_position in enumerate(gaia_pixel_positions):
+        if len(stars_pixel_positions) == 0:
+            continue
+        distances = numpy.hypot(stars_pixel_positions[:, 0] - gaia_pixel_position[0], stars_pixel_positions[:, 1] - gaia_pixel_position[1])
+        closest = numpy.argmin(distances)
+        if distances[closest] <= tolerance:  # Tolerance for match
+            # stars_pixel_positions = numpy.delete(stars_pixel_positions, closest, axis=0)
+            true_positives[index] = 1.0
+            match_distances[index] = distances[closest]
+            matched_star_positions.append(stars_pixel_positions[closest])
+            all_matching_data.append([stars_pixel_positions[closest][0],stars_pixel_positions[closest][1],gaia_pixel_position[0],gaia_pixel_position[1],gaia_magnitudes[closest]])
+            true_positive_counter+=1
 
-#     matched_star_positions      = numpy.array(matched_star_positions)
-#     all_matching_data           = numpy.array(all_matching_data)
+    matched_star_positions      = numpy.array(matched_star_positions)
+    all_matching_data           = numpy.array(all_matching_data)
 
-#     unique_star_pos             = numpy.array(list(set(tuple(p) for p in matched_star_positions)))
-#     _, unique_indices           = numpy.unique(all_matching_data[:, :2], axis=0, return_index=True)
-#     unique_star_pos_gaia_mag    = all_matching_data[numpy.sort(unique_indices)]
+    unique_star_pos             = numpy.array(list(set(tuple(p) for p in matched_star_positions)))
+    _, unique_indices           = numpy.unique(all_matching_data[:, :2], axis=0, return_index=True)
+    unique_star_pos_gaia_mag    = all_matching_data[numpy.sort(unique_indices)]
 
-#     recall = scipy.signal.convolve(numpy.concatenate((numpy.repeat(true_positives[0], window_size), true_positives, numpy.repeat(true_positives[-1], window_size))), window, mode="valid")
-#     subplot.plot(gaia_magnitudes, recall, c=petroff_colors_6[0], linestyle="-", linewidth=3.0)
-#     subplot.axhline(y=0.5, color="#000000", linestyle="--")
-#     subplot.set_xticks(numpy.arange(5, 19), minor=False)
-#     subplot.set_yticks(numpy.linspace(0.0, 1.0, 11, endpoint=True), minor=False)
-#     subplot.set_xlim(left=5.0, right=18.5)
-#     subplot.set_ylim(bottom=-0.05, top=1.05)
-#     subplot.grid(visible=True, which="major")
-#     subplot.grid(visible=True, which="minor")
-#     subplot.spines["top"].set_visible(False)
-#     subplot.spines["right"].set_visible(False)
-#     subplot.set_xlabel("Magnitude")
-#     subplot.set_ylabel("Recall (ratio of detected over total stars)")
-#     figure.savefig(astrometry_gaia_mag_path)
-#     plt.close(figure)
+    recall = scipy.signal.convolve(numpy.concatenate((numpy.repeat(true_positives[0], window_size), true_positives, numpy.repeat(true_positives[-1], window_size))), window, mode="valid")
+    subplot.plot(gaia_magnitudes, recall, c=petroff_colors_6[0], linestyle="-", linewidth=3.0)
+    subplot.axhline(y=0.5, color="#000000", linestyle="--")
+    subplot.set_xticks(numpy.arange(5, 19), minor=False)
+    subplot.set_yticks(numpy.linspace(0.0, 1.0, 11, endpoint=True), minor=False)
+    subplot.set_xlim(left=5.0, right=18.5)
+    subplot.set_ylim(bottom=-0.05, top=1.05)
+    subplot.grid(visible=True, which="major")
+    subplot.grid(visible=True, which="minor")
+    subplot.spines["top"].set_visible(False)
+    subplot.spines["right"].set_visible(False)
+    subplot.set_xlabel("Magnitude")
+    subplot.set_ylabel("Recall (ratio of detected over total stars)")
+    figure.savefig(astrometry_gaia_mag_path)
+    plt.close(figure)
 
-#     # Plotting additional image with true positive matches
-#     plt.style.use("dark_background")
-#     plt.rcParams["figure.figsize"] = [20, 12]
-#     plt.rcParams["font.size"] = 16
-#     figure, subplot = plt.subplots(nrows=1, ncols=1, layout="constrained")
-#     accumulated_frame_array = numpy.array(accumulated_frame)
-#     subplot.imshow(accumulated_frame_array, cmap='gray', origin='lower')
-#     matched_positions = gaia_pixel_positions[true_positives == 1]
-#     gaia_magnitudes_true_positives = gaia_magnitudes[true_positives == 1]
+    # Plotting additional image with true positive matches
+    plt.style.use("dark_background")
+    plt.rcParams["figure.figsize"] = [20, 12]
+    plt.rcParams["font.size"] = 16
+    figure, subplot = plt.subplots(nrows=1, ncols=1, layout="constrained")
+    accumulated_frame_array = numpy.array(accumulated_frame)
+    subplot.imshow(accumulated_frame_array, cmap='gray', origin='lower')
+    matched_positions = gaia_pixel_positions[true_positives == 1]
+    gaia_magnitudes_true_positives = gaia_magnitudes[true_positives == 1]
 
-#     if len(matched_positions) > 0:
-#         subplot.scatter(matched_positions[:, 0], matched_positions[:, 1], s=(gaia_magnitudes.max() - gaia_magnitudes_true_positives) * 4, c=petroff_colors_6[0], label='Gaia Stars - True Positives')
-#         # for position in matched_positions:
-#         #     circle = Circle((position[0], position[1]), radius=5, edgecolor='red', facecolor='none', linewidth=2)
-#         #     subplot.add_patch(circle)
-#         # subplot.scatter(stars_pixel_positions[:, 0], stars_pixel_positions[:, 1], s=200, marker="o", facecolors="none", edgecolors='green', linewidths=2, label='Source finder')
-#         subplot.scatter(matched_star_positions[:, 0], matched_star_positions[:, 1], s=550, marker="o", facecolors="none", edgecolors='red', linewidths=2, label='Source finder')
-#     # subplot.legend()
-#     plt.savefig(gaia_matches_path)
-#     plt.close(figure)
+    if len(matched_positions) > 0:
+        subplot.scatter(matched_positions[:, 0], matched_positions[:, 1], s=(gaia_magnitudes.max() - gaia_magnitudes_true_positives) * 4, c=petroff_colors_6[0], label='Gaia Stars - True Positives')
+        # for position in matched_positions:
+        #     circle = Circle((position[0], position[1]), radius=5, edgecolor='red', facecolor='none', linewidth=2)
+        #     subplot.add_patch(circle)
+        # subplot.scatter(stars_pixel_positions[:, 0], stars_pixel_positions[:, 1], s=200, marker="o", facecolors="none", edgecolors='green', linewidths=2, label='Source finder')
+        subplot.scatter(matched_star_positions[:, 0], matched_star_positions[:, 1], s=550, marker="o", facecolors="none", edgecolors='red', linewidths=2, label='Source finder')
+    # subplot.legend()
+    plt.savefig(gaia_matches_path)
+    plt.close(figure)
 
-#     plt.style.use("dark_background")
-#     plt.rcParams["figure.figsize"] = [20, 12]
-#     plt.rcParams["font.size"] = 16
+    plt.style.use("dark_background")
+    plt.rcParams["figure.figsize"] = [20, 12]
+    plt.rcParams["font.size"] = 16
 
-#     figure, ax = plt.subplots(nrows=1, ncols=1, layout="constrained")
-#     ax.imshow(accumulated_frame_array, origin='lower')
+    figure, ax = plt.subplots(nrows=1, ncols=1, layout="constrained")
+    ax.imshow(accumulated_frame_array, origin='lower')
 
-#     # figure, ax = plt.subplots(nrows=1, ncols=1, layout="constrained")
-#     # accumulated_frame_array = numpy.array(accumulated_frame)
-#     # ax.imshow(accumulated_frame_array, cmap='gray', origin='lower')
+    # figure, ax = plt.subplots(nrows=1, ncols=1, layout="constrained")
+    # accumulated_frame_array = numpy.array(accumulated_frame)
+    # ax.imshow(accumulated_frame_array, cmap='gray', origin='lower')
 
-#     x_coords = unique_star_pos_gaia_mag[:, 0]
-#     y_coords = unique_star_pos_gaia_mag[:, 1]
-#     stars = unique_star_pos_gaia_mag[:,0:2]
-#     magnitudes = unique_star_pos_gaia_mag[:, -1]
+    x_coords = unique_star_pos_gaia_mag[:, 0]
+    y_coords = unique_star_pos_gaia_mag[:, 1]
+    stars = unique_star_pos_gaia_mag[:,0:2]
+    magnitudes = unique_star_pos_gaia_mag[:, -1]
 
-#     # Scale magnitudes for hexagon sizes
-#     scaled_magnitudes = 1.0 - (magnitudes - magnitudes.min()) / (magnitudes.max() - magnitudes.min())
-#     sizes = scaled_magnitudes * 1000  # Adjust the scaling factor as needed
+    # Scale magnitudes for hexagon sizes
+    scaled_magnitudes = 1.0 - (magnitudes - magnitudes.min()) / (magnitudes.max() - magnitudes.min())
+    sizes = scaled_magnitudes * 1000  # Adjust the scaling factor as needed
 
-#     # for (x, y), size in zip(stars, sizes):
-#     #     hexagon = RegularPolygon((x, y), numVertices=6, radius=size**0.5, orientation=0, 
-#     #                              facecolor='none', edgecolor='white', linewidth=1.5, transform=ax.get_transform('pixel'))
-#     #     ax.add_patch(hexagon)
+    # for (x, y), size in zip(stars, sizes):
+    #     hexagon = RegularPolygon((x, y), numVertices=6, radius=size**0.5, orientation=0, 
+    #                              facecolor='none', edgecolor='white', linewidth=1.5, transform=ax.get_transform('pixel'))
+    #     ax.add_patch(hexagon)
 
-#     # Plot hexagons for each star
-#     for x, y, size in zip(x_coords, y_coords, sizes):
-#         hexagon = RegularPolygon((x, y), numVertices=6, radius=size**0.5, orientation=0, 
-#                                  facecolor='none', edgecolor='white', linewidth=1.5)
-#         ax.add_patch(hexagon)
+    # Plot hexagons for each star
+    for x, y, size in zip(x_coords, y_coords, sizes):
+        hexagon = RegularPolygon((x, y), numVertices=6, radius=size**0.5, orientation=0, 
+                                 facecolor='none', edgecolor='white', linewidth=1.5)
+        ax.add_patch(hexagon)
 
-#     ax.set_xlim([x_coords.min() - 10, x_coords.max() + 10])
-#     ax.set_ylim([y_coords.min() - 10, y_coords.max() + 10])
-#     ax.set_aspect('equal') 
+    ax.set_xlim([x_coords.min() - 10, x_coords.max() + 10])
+    ax.set_ylim([y_coords.min() - 10, y_coords.max() + 10])
+    ax.set_aspect('equal') 
 
-#     plt.savefig(astrometry_final)
-#     plt.close(figure)
+    plt.savefig(astrometry_final)
+    plt.close(figure)
     
-#     print_message(f"Total extracted stars: {len(stars_pixel_positions[:, 0])}", color='yellow', style='bold')
-#     print_message(f"Total astrometry stars: {len(astrometry_stars[:, 0])}", color='yellow', style='bold')
-#     print_message(f"Total gaia stars: {len(gaia_pixel_positions[:, 0])}", color='yellow', style='bold')
-#     print_message(f"Total detected stars: {len(unique_star_pos)}", color='red', style='bold')
+    print_message(f"Total extracted stars: {len(stars_pixel_positions[:, 0])}", color='yellow', style='bold')
+    print_message(f"Total astrometry stars: {len(astrometry_stars[:, 0])}", color='yellow', style='bold')
+    print_message(f"Total gaia stars: {len(gaia_pixel_positions[:, 0])}", color='yellow', style='bold')
+    print_message(f"Total detected stars: {len(unique_star_pos)}", color='red', style='bold')
     
 
 
@@ -4646,7 +4355,7 @@ def accumulate4D(
     zoom: float,
 ):
     return CumulativeMap(
-        pixels=dvs_warping_package_extension.accumulate4D(  # type: ignore
+        pixels=dvs_sparse_filter_extension.accumulate4D(  # type: ignore
             sensor_size[0],
             sensor_size[1],
             events["t"].astype("<f8"),
@@ -4670,7 +4379,7 @@ def accumulate4D_cnt(
     zoom: numpy.ndarray,
 ):
     return CumulativeMap(
-        pixels=dvs_warping_package_extension.accumulate4D_cnt(  # type: ignore
+        pixels=dvs_sparse_filter_extension.accumulate4D_cnt(  # type: ignore
             sensor_size[0],
             sensor_size[1],
             events["t"].astype("<f8"),
@@ -4691,7 +4400,7 @@ def geometric_transformation(
         resolution: float, 
         rotation_angle: float
 ):
-    rotated_particles = dvs_warping_package_extension.geometricTransformation(
+    rotated_particles = dvs_sparse_filter_extension.geometricTransformation(
         resolution, 
         rotation_angle)
     return rotated_particles
@@ -5230,562 +4939,562 @@ def rgb_render(cumulative_map_object, l_values):
     return image.transpose(PIL.Image.FLIP_TOP_BOTTOM)
 
 
-# import logging
-# from typing import Optional, Tuple, Union
+import logging
+from typing import Optional, Tuple, Union
 
-# # from scipy.ndimage.filters import gaussian_filter
-
-
-# NUMPY_TORCH = Union[numpy.ndarray, torch.Tensor]
-# FLOAT_TORCH = Union[float, torch.Tensor]
+# from scipy.ndimage.filters import gaussian_filter
 
 
-# def is_torch(args):
-#     return isinstance(args, torch.Tensor)
+NUMPY_TORCH = Union[numpy.ndarray, torch.Tensor]
+FLOAT_TORCH = Union[float, torch.Tensor]
 
 
-# def is_numpy(args):
-#     return isinstance(args, numpy.ndarray)
+def is_torch(args):
+    return isinstance(args, torch.Tensor)
 
 
-# def nt_max(array: NUMPY_TORCH, dim: int) -> NUMPY_TORCH:
-#     """max function compatible for numpy ndarray and torch tensor.
-
-#     Args:
-#         array (NUMPY_TORCH):
-
-#     Returns:
-#         NUMPY_TORCH: _description_
-#     """
-#     if is_numpy(array):
-#         return array.max(axis=dim)
-#     elif is_torch(array):
-#         return torch.max(array, dim).values
+def is_numpy(args):
+    return isinstance(args, numpy.ndarray)
 
 
-# def nt_min(array: NUMPY_TORCH, dim: int) -> NUMPY_TORCH:
-#     """Min function compatible for numpy ndarray and torch tensor.
+def nt_max(array: NUMPY_TORCH, dim: int) -> NUMPY_TORCH:
+    """max function compatible for numpy ndarray and torch tensor.
 
-#     Args:
-#         array (NUMPY_TORCH):
+    Args:
+        array (NUMPY_TORCH):
 
-#     Returns:
-#         NUMPY_TORCH: _description_
-#     """
-#     if is_numpy(array):
-#         return array.min(axis=dim)
-#     elif is_torch(array):
-#         return torch.min(array, dim).values
-
-
-# def create_iwe(
-#     self,
-#     events: NUMPY_TORCH,
-#     method: str = "bilinear_vote",
-#     sigma: int = 1,
-# ) -> NUMPY_TORCH:
-#     """Create Image of Warped Events (IWE).
-
-#     Args:
-#         events (NUMPY_TORCH): [(b,) n_events, 4]
-#         method (str): [description]
-#         sigma (float): [description]
-
-#     Returns:
-#         NUMPY_TORCH: [(b,) H, W]
-#     """
-#     if is_numpy(events):
-#         return self.create_image_from_events_numpy(events, method, sigma=sigma)
-#     elif is_torch(events):
-#         return self.create_image_from_events_tensor(events, method, sigma=sigma)
-
-# def create_iwd(
-#     self,
-#     events: NUMPY_TORCH,
-#     div: NUMPY_TORCH,
-#     sigma: int = 1,
-# ) -> NUMPY_TORCH:
-#     """Create Image of Average Divergence.
-
-#     Args:
-#         events (NUMPY_TORCH): [(b,) n_events, 4]
-#         div (NUMPY_TORCH): [description]
-#         sigma (float): [description]
-
-#     Returns:
-#         NUMPY_TORCH: [(b,) H, W]
-#     """
-#     if len(events.shape) == 2:
-#         image_size = self.image_size
-#     else:
-#         image_size = (len(events),) + self.image_size
-#     if is_numpy(events):
-#         assert is_numpy(div)
-#         sum_diwe = numpy.zeros(image_size)
-#         count = numpy.zeros(image_size)
-#         sum_diwe += self.create_image_from_events_numpy(events, weight=div, sigma=0)
-#         count += self.create_image_from_events_numpy(events, sigma=0)
-#         diwe = numpy.divide(sum_diwe, count + 1e-2)
-#         if sigma > 0:
-#             diwe = gaussian_filter(diwe, sigma)
-#         return diwe
-#     elif is_torch(events):
-#         assert is_torch(div)
-
-#         sum_diwe = events.new_zeros(image_size)
-#         count = events.new_zeros(image_size)
-
-#         sum_diwe += self.create_image_from_events_tensor(events, weight=div, sigma=0)
-#         count += self.create_image_from_events_tensor(events, sigma=0)
-#         diwe = torch.divide(sum_diwe, count + 1e-2)
-
-#         if len(diwe.shape) == 2:
-#             diwe = diwe[None, None, ...]
-#         elif len(diwe.shape) == 3:
-#             diwe = diwe[:, None, ...]
-#         if sigma > 0:
-#             diwe = gaussian_blur(diwe, kernel_size=3, sigma=sigma)
-#         return diwe
-
-#     raise RuntimeError
-
-# def create_iwt(
-#     self,
-#     events: NUMPY_TORCH,
-#     trace: NUMPY_TORCH,
-#     sigma: int = 1,
-# ) -> NUMPY_TORCH:
-#     """Create Image of Average Trace.
-
-#     Args:
-#         events (NUMPY_TORCH): [(b,) n_events, 4]
-#         trace (NUMPY_TORCH): [n_events]
-#         sigma (float): [description]
-
-#     Returns:
-#         NUMPY_TORCH: [(b,) H, W]
-#     """
-#     # base = np.mean(trace)
-#     base = 2
-#     if len(events.shape) == 2:
-#         image_size = self.image_size
-#     else:
-#         image_size = (len(events),) + self.image_size
-
-#     if is_numpy(events):
-#         assert is_numpy(trace)
-#         sum_tiwe = numpy.zeros(image_size)
-#         count = numpy.zeros(image_size)
-#         sum_tiwe += self.create_image_from_events_numpy(events, weight=trace - base, sigma=0)
-#         count += self.create_image_from_events_numpy(events, sigma=0)
-#         tiwe = numpy.divide(sum_tiwe, count + 1e-2) + base
-#         if sigma > 0:
-#             tiwe = gaussian_filter(tiwe, sigma)
-#         return tiwe
-#     elif is_torch(events):
-#         assert is_torch(trace)
-
-#         sum_tiwe = events.new_zeros(image_size)
-#         count = events.new_zeros(image_size)
-
-#         sum_tiwe += self.create_image_from_events_tensor(events, weight=trace - base, sigma=0)
-#         count += self.create_image_from_events_tensor(events, sigma=0)
-#         tiwe = torch.divide(sum_tiwe, count + 1e-2) + base
-
-#         if len(tiwe.shape) == 2:
-#             tiwe = tiwe[None, None, ...]
-#         elif len(tiwe.shape) == 3:
-#             tiwe = tiwe[:, None, ...]
-#         if sigma > 0:
-#             tiwe = gaussian_blur(tiwe, kernel_size=3, sigma=sigma)
-#         return tiwe
-#     raise RuntimeError
-
-# def create_iat(self, events, ts, sigma):
-#     pass
-
-# def create_probability_iwe(
-#     self,
-#     events: NUMPY_TORCH,
-#     prob: NUMPY_TORCH,
-#     sigma: int = 1,
-# ) -> NUMPY_TORCH:
-#     """Create Image of Warped Events (IWE) with event association probability.
-#     From Stoffregen ICCV 2019, motion segmentation paper.
-
-#     Args:
-#         events (NUMPY_TORCH): [(b,) n_events, 4]
-#         prob (NUMPY_TORCH): [n_events]
-#         sigma (float): [description]
-
-#     Returns:
-#         NUMPY_TORCH: [(b,) H, W]
-#     """
-#     if is_numpy(events):
-#         return self.create_image_from_events_numpy(events, weight=prob, sigma=sigma)
-#     elif is_torch(events):
-#         return self.create_image_from_events_tensor(events, weight=prob, sigma=sigma)
-#     # e = f"Non-supported type of events. {type(events)}"
-#     # logger.error(e)
-#     # raise RuntimeError(e)
-
-# def create_timeimage(
-#     self,
-#     events: NUMPY_TORCH,
-#     ts: NUMPY_TORCH,
-#     # t_ref: FLOAT_TORCH,
-#     sigma: int = 1,
-# ) -> NUMPY_TORCH:
-#     """Create time image, sum of timestamps.
-#     Args:
-#         events (NUMPY_TORCH): [(b,) n_events, 4]
-#         ts (NUMPY_TORCH): [(b,) n_events]
-#         sigma (float): [description]
-
-#     Returns:
-#         NUMPY_TORCH: [(b,) H, W]
-#     """
-#     if is_numpy(events):
-#         assert is_numpy(ts)
-#         return self.create_image_from_events_numpy(events, weight=ts, sigma=sigma)
-#     elif is_torch(events):
-#         assert is_torch(ts)
-#         return self.create_image_from_events_tensor(events, weight=ts, sigma=sigma)
-#     raise RuntimeError
-
-# def create_eventmask(self, events: NUMPY_TORCH) -> NUMPY_TORCH:
-#     """Create mask image where at least one event exists.
-
-#     Args:
-#         events (NUMPY_TORCH): [(b,) n_events, 4]
-
-#     Returns:
-#         NUMPY_TORCH: [(b,) 1, H, W]
-#     """
-#     if is_numpy(events):
-#         return (0 != self.create_image_from_events_numpy(events, sigma=0))[..., None, :, :]
-#     elif is_torch(events):
-#         return (0 != self.create_image_from_events_tensor(events, sigma=0))[..., None, :, :]
-#     raise RuntimeError
+    Returns:
+        NUMPY_TORCH: _description_
+    """
+    if is_numpy(array):
+        return array.max(axis=dim)
+    elif is_torch(array):
+        return torch.max(array, dim).values
 
 
-# def create_eventrate(self, events: NUMPY_TORCH, stat: str = 'max') -> NUMPY_TORCH:
-#     """Create event-rate image.
+def nt_min(array: NUMPY_TORCH, dim: int) -> NUMPY_TORCH:
+    """Min function compatible for numpy ndarray and torch tensor.
 
-#     Args:
-#         events (NUMPY_TORCH): _description_
-#         stat (str): 'max' or 'mean'
+    Args:
+        array (NUMPY_TORCH):
 
-#     Returns:
-#         NUMPY_TORCH: [(b, ) H, W]
-#     """
-#     if is_numpy(events):
-#         eventrate = numpy.zeros(self.image_size)
-#         time_image = numpy.ones(self.image_size) * numpy.inf  # last timestamp
-#         for e in events:
-#             dt = e[2] - time_image[int(e[0]), int(e[1])]
-#             if dt > 0:  # more than one events at the pixel
-#                 if stat == 'max':
-#                     eventrate[int(e[0]), int(e[1])] = max(eventrate[int(e[0]), int(e[1])], 1. / dt)
-#                 # elif stat ==  'mean':
-#                 #     eventrate[int(e[0]), int(e[1])] += dt # divide later
+    Returns:
+        NUMPY_TORCH: _description_
+    """
+    if is_numpy(array):
+        return array.min(axis=dim)
+    elif is_torch(array):
+        return torch.min(array, dim).values
 
-#             time_image[int(e[0]), int(e[1])] = e[2]
-#         return eventrate                
-#     raise RuntimeError
+
+def create_iwe(
+    self,
+    events: NUMPY_TORCH,
+    method: str = "bilinear_vote",
+    sigma: int = 1,
+) -> NUMPY_TORCH:
+    """Create Image of Warped Events (IWE).
+
+    Args:
+        events (NUMPY_TORCH): [(b,) n_events, 4]
+        method (str): [description]
+        sigma (float): [description]
+
+    Returns:
+        NUMPY_TORCH: [(b,) H, W]
+    """
+    if is_numpy(events):
+        return self.create_image_from_events_numpy(events, method, sigma=sigma)
+    elif is_torch(events):
+        return self.create_image_from_events_tensor(events, method, sigma=sigma)
+
+def create_iwd(
+    self,
+    events: NUMPY_TORCH,
+    div: NUMPY_TORCH,
+    sigma: int = 1,
+) -> NUMPY_TORCH:
+    """Create Image of Average Divergence.
+
+    Args:
+        events (NUMPY_TORCH): [(b,) n_events, 4]
+        div (NUMPY_TORCH): [description]
+        sigma (float): [description]
+
+    Returns:
+        NUMPY_TORCH: [(b,) H, W]
+    """
+    if len(events.shape) == 2:
+        image_size = self.image_size
+    else:
+        image_size = (len(events),) + self.image_size
+    if is_numpy(events):
+        assert is_numpy(div)
+        sum_diwe = numpy.zeros(image_size)
+        count = numpy.zeros(image_size)
+        sum_diwe += self.create_image_from_events_numpy(events, weight=div, sigma=0)
+        count += self.create_image_from_events_numpy(events, sigma=0)
+        diwe = numpy.divide(sum_diwe, count + 1e-2)
+        if sigma > 0:
+            diwe = gaussian_filter(diwe, sigma)
+        return diwe
+    elif is_torch(events):
+        assert is_torch(div)
+
+        sum_diwe = events.new_zeros(image_size)
+        count = events.new_zeros(image_size)
+
+        sum_diwe += self.create_image_from_events_tensor(events, weight=div, sigma=0)
+        count += self.create_image_from_events_tensor(events, sigma=0)
+        diwe = torch.divide(sum_diwe, count + 1e-2)
+
+        if len(diwe.shape) == 2:
+            diwe = diwe[None, None, ...]
+        elif len(diwe.shape) == 3:
+            diwe = diwe[:, None, ...]
+        if sigma > 0:
+            diwe = gaussian_blur(diwe, kernel_size=3, sigma=sigma)
+        return diwe
+
+    raise RuntimeError
+
+def create_iwt(
+    self,
+    events: NUMPY_TORCH,
+    trace: NUMPY_TORCH,
+    sigma: int = 1,
+) -> NUMPY_TORCH:
+    """Create Image of Average Trace.
+
+    Args:
+        events (NUMPY_TORCH): [(b,) n_events, 4]
+        trace (NUMPY_TORCH): [n_events]
+        sigma (float): [description]
+
+    Returns:
+        NUMPY_TORCH: [(b,) H, W]
+    """
+    # base = np.mean(trace)
+    base = 2
+    if len(events.shape) == 2:
+        image_size = self.image_size
+    else:
+        image_size = (len(events),) + self.image_size
+
+    if is_numpy(events):
+        assert is_numpy(trace)
+        sum_tiwe = numpy.zeros(image_size)
+        count = numpy.zeros(image_size)
+        sum_tiwe += self.create_image_from_events_numpy(events, weight=trace - base, sigma=0)
+        count += self.create_image_from_events_numpy(events, sigma=0)
+        tiwe = numpy.divide(sum_tiwe, count + 1e-2) + base
+        if sigma > 0:
+            tiwe = gaussian_filter(tiwe, sigma)
+        return tiwe
+    elif is_torch(events):
+        assert is_torch(trace)
+
+        sum_tiwe = events.new_zeros(image_size)
+        count = events.new_zeros(image_size)
+
+        sum_tiwe += self.create_image_from_events_tensor(events, weight=trace - base, sigma=0)
+        count += self.create_image_from_events_tensor(events, sigma=0)
+        tiwe = torch.divide(sum_tiwe, count + 1e-2) + base
+
+        if len(tiwe.shape) == 2:
+            tiwe = tiwe[None, None, ...]
+        elif len(tiwe.shape) == 3:
+            tiwe = tiwe[:, None, ...]
+        if sigma > 0:
+            tiwe = gaussian_blur(tiwe, kernel_size=3, sigma=sigma)
+        return tiwe
+    raise RuntimeError
+
+def create_iat(self, events, ts, sigma):
+    pass
+
+def create_probability_iwe(
+    self,
+    events: NUMPY_TORCH,
+    prob: NUMPY_TORCH,
+    sigma: int = 1,
+) -> NUMPY_TORCH:
+    """Create Image of Warped Events (IWE) with event association probability.
+    From Stoffregen ICCV 2019, motion segmentation paper.
+
+    Args:
+        events (NUMPY_TORCH): [(b,) n_events, 4]
+        prob (NUMPY_TORCH): [n_events]
+        sigma (float): [description]
+
+    Returns:
+        NUMPY_TORCH: [(b,) H, W]
+    """
+    if is_numpy(events):
+        return self.create_image_from_events_numpy(events, weight=prob, sigma=sigma)
+    elif is_torch(events):
+        return self.create_image_from_events_tensor(events, weight=prob, sigma=sigma)
+    # e = f"Non-supported type of events. {type(events)}"
+    # logger.error(e)
+    # raise RuntimeError(e)
+
+def create_timeimage(
+    self,
+    events: NUMPY_TORCH,
+    ts: NUMPY_TORCH,
+    # t_ref: FLOAT_TORCH,
+    sigma: int = 1,
+) -> NUMPY_TORCH:
+    """Create time image, sum of timestamps.
+    Args:
+        events (NUMPY_TORCH): [(b,) n_events, 4]
+        ts (NUMPY_TORCH): [(b,) n_events]
+        sigma (float): [description]
+
+    Returns:
+        NUMPY_TORCH: [(b,) H, W]
+    """
+    if is_numpy(events):
+        assert is_numpy(ts)
+        return self.create_image_from_events_numpy(events, weight=ts, sigma=sigma)
+    elif is_torch(events):
+        assert is_torch(ts)
+        return self.create_image_from_events_tensor(events, weight=ts, sigma=sigma)
+    raise RuntimeError
+
+def create_eventmask(self, events: NUMPY_TORCH) -> NUMPY_TORCH:
+    """Create mask image where at least one event exists.
+
+    Args:
+        events (NUMPY_TORCH): [(b,) n_events, 4]
+
+    Returns:
+        NUMPY_TORCH: [(b,) 1, H, W]
+    """
+    if is_numpy(events):
+        return (0 != self.create_image_from_events_numpy(events, sigma=0))[..., None, :, :]
+    elif is_torch(events):
+        return (0 != self.create_image_from_events_tensor(events, sigma=0))[..., None, :, :]
+    raise RuntimeError
+
+
+def create_eventrate(self, events: NUMPY_TORCH, stat: str = 'max') -> NUMPY_TORCH:
+    """Create event-rate image.
+
+    Args:
+        events (NUMPY_TORCH): _description_
+        stat (str): 'max' or 'mean'
+
+    Returns:
+        NUMPY_TORCH: [(b, ) H, W]
+    """
+    if is_numpy(events):
+        eventrate = numpy.zeros(self.image_size)
+        time_image = numpy.ones(self.image_size) * numpy.inf  # last timestamp
+        for e in events:
+            dt = e[2] - time_image[int(e[0]), int(e[1])]
+            if dt > 0:  # more than one events at the pixel
+                if stat == 'max':
+                    eventrate[int(e[0]), int(e[1])] = max(eventrate[int(e[0]), int(e[1])], 1. / dt)
+                # elif stat ==  'mean':
+                #     eventrate[int(e[0]), int(e[1])] += dt # divide later
+
+            time_image[int(e[0]), int(e[1])] = e[2]
+        return eventrate                
+    raise RuntimeError
     
 
-# # Lower layer functions
-# # Image creation functions
-# def create_image_from_events_numpy(
-#     self,
-#     events: numpy.ndarray,
-#     method: str = "bilinear_vote",
-#     weight: Union[float, numpy.ndarray] = 1.0,
-#     sigma: int = 1,
-# ) -> numpy.ndarray:
-#     """Create image of events for numpy array.
+# Lower layer functions
+# Image creation functions
+def create_image_from_events_numpy(
+    self,
+    events: numpy.ndarray,
+    method: str = "bilinear_vote",
+    weight: Union[float, numpy.ndarray] = 1.0,
+    sigma: int = 1,
+) -> numpy.ndarray:
+    """Create image of events for numpy array.
 
-#     Inputs:
-#         events (np.ndarray) ... [(b,) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
-#             Also, x is height dimension and y is the width dimension.
-#         method (str) ... method to accumulate events. "count", "bilinear_vote", "polarity", etc.
-#         weight (float or np.ndarray) ... Only applicable when method = "bilinear_vote".
-#         sigma (int) ... Sigma for the gaussian blur.
+    Inputs:
+        events (np.ndarray) ... [(b,) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
+            Also, x is height dimension and y is the width dimension.
+        method (str) ... method to accumulate events. "count", "bilinear_vote", "polarity", etc.
+        weight (float or np.ndarray) ... Only applicable when method = "bilinear_vote".
+        sigma (int) ... Sigma for the gaussian blur.
 
-#     Returns:
-#         image ... [(b,) H, W]. Each index indicates the sum of the event, based on the specified method.
-#     """
-#     if method == "count":
-#         image = self.count_event_numpy(events)
-#     elif method == "bilinear_vote":
-#         image = self.bilinear_vote_numpy(events, weight=weight)
-#     elif method == "polarity":  # TODO implement
-#         pos_flag = events[..., 3] > 0
-#         if is_numpy(weight):
-#             pos_image = self.bilinear_vote_numpy(events[pos_flag], weight=weight[pos_flag])
-#             neg_image = self.bilinear_vote_numpy(events[~pos_flag], weight=weight[~pos_flag])
-#         else:
-#             pos_image = self.bilinear_vote_numpy(events[pos_flag], weight=weight)
-#             neg_image = self.bilinear_vote_numpy(events[~pos_flag], weight=weight)
-#         image = numpy.stack([pos_image, neg_image], axis=-3)
-#     else:
-#         e = f"{method = } is not supported."
-#         logger.error(e)
-#         raise NotImplementedError(e)
-#     if sigma > 0:
-#         image = gaussian_filter(image, sigma)
-#     return image
+    Returns:
+        image ... [(b,) H, W]. Each index indicates the sum of the event, based on the specified method.
+    """
+    if method == "count":
+        image = self.count_event_numpy(events)
+    elif method == "bilinear_vote":
+        image = self.bilinear_vote_numpy(events, weight=weight)
+    elif method == "polarity":  # TODO implement
+        pos_flag = events[..., 3] > 0
+        if is_numpy(weight):
+            pos_image = self.bilinear_vote_numpy(events[pos_flag], weight=weight[pos_flag])
+            neg_image = self.bilinear_vote_numpy(events[~pos_flag], weight=weight[~pos_flag])
+        else:
+            pos_image = self.bilinear_vote_numpy(events[pos_flag], weight=weight)
+            neg_image = self.bilinear_vote_numpy(events[~pos_flag], weight=weight)
+        image = numpy.stack([pos_image, neg_image], axis=-3)
+    else:
+        e = f"{method = } is not supported."
+        logger.error(e)
+        raise NotImplementedError(e)
+    if sigma > 0:
+        image = gaussian_filter(image, sigma)
+    return image
 
-# def create_image_from_events_tensor(
-#     self,
-#     events: torch.Tensor,
-#     method: str = "bilinear_vote",
-#     weight: FLOAT_TORCH = 1.0,
-#     sigma: int = 0,
-# ) -> torch.Tensor:
-#     """Create image of events for tensor array.
+def create_image_from_events_tensor(
+    self,
+    events: torch.Tensor,
+    method: str = "bilinear_vote",
+    weight: FLOAT_TORCH = 1.0,
+    sigma: int = 0,
+) -> torch.Tensor:
+    """Create image of events for tensor array.
 
-#     Inputs:
-#         events (torch.Tensor) ... [(b, ) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
-#             Also, x is the width dimension and y is the height dimension.
-#         method (str) ... method to accumulate events. "count", "bilinear_vote", "polarity", etc.
-#         weight (float or torch.Tensor) ... Only applicable when method = "bilinear_vote".
-#         sigma (int) ... Sigma for the gaussian blur.
+    Inputs:
+        events (torch.Tensor) ... [(b, ) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
+            Also, x is the width dimension and y is the height dimension.
+        method (str) ... method to accumulate events. "count", "bilinear_vote", "polarity", etc.
+        weight (float or torch.Tensor) ... Only applicable when method = "bilinear_vote".
+        sigma (int) ... Sigma for the gaussian blur.
 
-#     Returns:
-#         image ... [(b, ) W, H]. Each index indicates the sum of the event, based on the specified method.
-#     """
-#     if method == "count":
-#         image = self.count_event_tensor(events)
-#     elif method == "bilinear_vote":
-#         image = self.bilinear_vote_tensor(events, weight=weight)
-#     else:
-#         e = f"{method = } is not implemented"
-#         logger.error(e)
-#         raise NotImplementedError(e)
-#     if sigma > 0:
-#         if len(image.shape) == 2:
-#             image = image[None, None, ...]
-#         elif len(image.shape) == 3:
-#             image = image[:, None, ...]
-#         image = gaussian_blur(image, kernel_size=3, sigma=sigma)
-#     return torch.squeeze(image)
+    Returns:
+        image ... [(b, ) W, H]. Each index indicates the sum of the event, based on the specified method.
+    """
+    if method == "count":
+        image = self.count_event_tensor(events)
+    elif method == "bilinear_vote":
+        image = self.bilinear_vote_tensor(events, weight=weight)
+    else:
+        e = f"{method = } is not implemented"
+        logger.error(e)
+        raise NotImplementedError(e)
+    if sigma > 0:
+        if len(image.shape) == 2:
+            image = image[None, None, ...]
+        elif len(image.shape) == 3:
+            image = image[:, None, ...]
+        image = gaussian_blur(image, kernel_size=3, sigma=sigma)
+    return torch.squeeze(image)
 
-# def count_event_numpy(self, events: numpy.ndarray):
-#     """Count event and make image.
+def count_event_numpy(self, events: numpy.ndarray):
+    """Count event and make image.
 
-#     Args:
-#         events ... [(b,) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
+    Args:
+        events ... [(b,) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
 
-#     Returns:
-#         image ... [(b,) W, H]. Each index indicates the sum of the event, just counting.
-#     """
-#     if len(events.shape) == 2:
-#         events = events[None, ...]  # 1 x n x 4
+    Returns:
+        image ... [(b,) W, H]. Each index indicates the sum of the event, just counting.
+    """
+    if len(events.shape) == 2:
+        events = events[None, ...]  # 1 x n x 4
 
-#     # x-y is opencv coordinate
-#     ph, pw = self.outer_padding
-#     h, w = self.image_size
-#     nb = len(events)
-#     image = numpy.zeros((nb, h * w), dtype=numpy.float64)
+    # x-y is opencv coordinate
+    ph, pw = self.outer_padding
+    h, w = self.image_size
+    nb = len(events)
+    image = numpy.zeros((nb, h * w), dtype=numpy.float64)
 
-#     floor_xy = numpy.floor(events[..., :2] + 1e-8)
-#     floor_to_xy = events[..., :2] - floor_xy
+    floor_xy = numpy.floor(events[..., :2] + 1e-8)
+    floor_to_xy = events[..., :2] - floor_xy
 
-#     x1 = floor_xy[..., 1] + pw
-#     y1 = floor_xy[..., 0] + ph
-#     inds = numpy.concatenate(
-#         [
-#             x1 + y1 * w,
-#             x1 + (y1 + 1) * w,
-#             (x1 + 1) + y1 * w,
-#             (x1 + 1) + (y1 + 1) * w,
-#         ],
-#         axis=-1,
-#     )
-#     inds_mask = numpy.concatenate(
-#         [
-#             (0 <= x1) * (x1 < w) * (0 <= y1) * (y1 < h),
-#             (0 <= x1) * (x1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
-#             (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1) * (y1 < h),
-#             (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
-#         ],
-#         axis=-1,
-#     )
-#     vals = numpy.ones_like(inds)
-#     inds = (inds * inds_mask).astype(numpy.int64)
-#     vals = vals * inds_mask
-#     for i in range(nb):
-#         numpy.add.at(image[i], inds[i], vals[i])
-#     return image.reshape((nb,) + self.image_size).squeeze()
+    x1 = floor_xy[..., 1] + pw
+    y1 = floor_xy[..., 0] + ph
+    inds = numpy.concatenate(
+        [
+            x1 + y1 * w,
+            x1 + (y1 + 1) * w,
+            (x1 + 1) + y1 * w,
+            (x1 + 1) + (y1 + 1) * w,
+        ],
+        axis=-1,
+    )
+    inds_mask = numpy.concatenate(
+        [
+            (0 <= x1) * (x1 < w) * (0 <= y1) * (y1 < h),
+            (0 <= x1) * (x1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
+            (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1) * (y1 < h),
+            (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
+        ],
+        axis=-1,
+    )
+    vals = numpy.ones_like(inds)
+    inds = (inds * inds_mask).astype(numpy.int64)
+    vals = vals * inds_mask
+    for i in range(nb):
+        numpy.add.at(image[i], inds[i], vals[i])
+    return image.reshape((nb,) + self.image_size).squeeze()
 
-# def count_event_tensor(self, events: torch.Tensor):
-#     """Tensor version of `count_event_numpy().`
+def count_event_tensor(self, events: torch.Tensor):
+    """Tensor version of `count_event_numpy().`
 
-#     Args:
-#         events (torch.Tensor) ... [(b,) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
+    Args:
+        events (torch.Tensor) ... [(b,) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
 
-#     Returns:
-#         image ... [(b,) H, W]. Each index indicates the bilinear vote result. If the outer_padding is set,
-#             the return size will be [H + outer_padding, W + outer_padding].
-#     """
-#     if len(events.shape) == 2:
-#         events = events[None, ...]  # 1 x n x 4
+    Returns:
+        image ... [(b,) H, W]. Each index indicates the bilinear vote result. If the outer_padding is set,
+            the return size will be [H + outer_padding, W + outer_padding].
+    """
+    if len(events.shape) == 2:
+        events = events[None, ...]  # 1 x n x 4
 
-#     ph, pw = self.outer_padding
-#     h, w = self.image_size
-#     nb = len(events)
-#     image = events.new_zeros((nb, h * w))
+    ph, pw = self.outer_padding
+    h, w = self.image_size
+    nb = len(events)
+    image = events.new_zeros((nb, h * w))
 
-#     floor_xy = torch.floor(events[..., :2] + 1e-6)
-#     floor_to_xy = events[..., :2] - floor_xy
-#     floor_xy = floor_xy.long()
+    floor_xy = torch.floor(events[..., :2] + 1e-6)
+    floor_to_xy = events[..., :2] - floor_xy
+    floor_xy = floor_xy.long()
 
-#     x1 = floor_xy[..., 1] + pw
-#     y1 = floor_xy[..., 0] + ph
-#     inds = torch.cat(
-#         [
-#             x1 + y1 * w,
-#             x1 + (y1 + 1) * w,
-#             (x1 + 1) + y1 * w,
-#             (x1 + 1) + (y1 + 1) * w,
-#         ],
-#         dim=-1,
-#     )  # [(b, ) n_events x 4]
-#     inds_mask = torch.cat(
-#         [
-#             (0 <= x1) * (x1 < w) * (0 <= y1) * (y1 < h),
-#             (0 <= x1) * (x1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
-#             (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1) * (y1 < h),
-#             (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
-#         ],
-#         axis=-1,
-#     )
-#     vals = torch.ones_like(inds)
-#     inds = (inds * inds_mask).long()
-#     vals = vals * inds_mask
-#     image.scatter_add_(1, inds, vals)
-#     return image.reshape((nb,) + self.image_size).squeeze()
+    x1 = floor_xy[..., 1] + pw
+    y1 = floor_xy[..., 0] + ph
+    inds = torch.cat(
+        [
+            x1 + y1 * w,
+            x1 + (y1 + 1) * w,
+            (x1 + 1) + y1 * w,
+            (x1 + 1) + (y1 + 1) * w,
+        ],
+        dim=-1,
+    )  # [(b, ) n_events x 4]
+    inds_mask = torch.cat(
+        [
+            (0 <= x1) * (x1 < w) * (0 <= y1) * (y1 < h),
+            (0 <= x1) * (x1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
+            (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1) * (y1 < h),
+            (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
+        ],
+        axis=-1,
+    )
+    vals = torch.ones_like(inds)
+    inds = (inds * inds_mask).long()
+    vals = vals * inds_mask
+    image.scatter_add_(1, inds, vals)
+    return image.reshape((nb,) + self.image_size).squeeze()
 
-# def bilinear_vote_numpy(self, events: numpy.ndarray, weight: Union[float, numpy.ndarray] = 1.0):
-#     """Use bilinear voting to and make image.
+def bilinear_vote_numpy(self, events: numpy.ndarray, weight: Union[float, numpy.ndarray] = 1.0):
+    """Use bilinear voting to and make image.
 
-#     Args:
-#         events (np.ndarray) ... [(b, ) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
-#         weight (float or np.ndarray) ... Weight to multiply to the voting value.
-#             If scalar, the weight is all the same among events.
-#             If it's array-like, it should be the shape of [n_events].
-#             Defaults to 1.0.
+    Args:
+        events (np.ndarray) ... [(b, ) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
+        weight (float or np.ndarray) ... Weight to multiply to the voting value.
+            If scalar, the weight is all the same among events.
+            If it's array-like, it should be the shape of [n_events].
+            Defaults to 1.0.
 
-#     Returns:
-#         image ... [(b, ) H, W]. Each index indicates the bilinear vote result. If the outer_padding is set,
-#             the return size will be [H + outer_padding, W + outer_padding].
-#     """
-#     if type(weight) == numpy.ndarray:
-#         assert weight.shape == events.shape[:-1]
-#     if len(events.shape) == 2:
-#         events = events[None, ...]  # 1 x n x 4
+    Returns:
+        image ... [(b, ) H, W]. Each index indicates the bilinear vote result. If the outer_padding is set,
+            the return size will be [H + outer_padding, W + outer_padding].
+    """
+    if type(weight) == numpy.ndarray:
+        assert weight.shape == events.shape[:-1]
+    if len(events.shape) == 2:
+        events = events[None, ...]  # 1 x n x 4
 
-#     # x-y is opencv coordinate
-#     ph, pw = self.outer_padding
-#     h, w = self.image_size
-#     nb = len(events)
-#     image = numpy.zeros((nb, h * w), dtype=numpy.float64)
+    # x-y is opencv coordinate
+    ph, pw = self.outer_padding
+    h, w = self.image_size
+    nb = len(events)
+    image = numpy.zeros((nb, h * w), dtype=numpy.float64)
 
-#     floor_xy = numpy.floor(events[..., :2] + 1e-8)
-#     floor_to_xy = events[..., :2] - floor_xy
+    floor_xy = numpy.floor(events[..., :2] + 1e-8)
+    floor_to_xy = events[..., :2] - floor_xy
 
-#     x1 = floor_xy[..., 1] + pw
-#     y1 = floor_xy[..., 0] + ph
-#     inds = numpy.concatenate(
-#         [
-#             x1 + y1 * w,
-#             x1 + (y1 + 1) * w,
-#             (x1 + 1) + y1 * w,
-#             (x1 + 1) + (y1 + 1) * w,
-#         ],
-#         axis=-1,
-#     )
-#     inds_mask = numpy.concatenate(
-#         [
-#             (0 <= x1) * (x1 < w) * (0 <= y1) * (y1 < h),
-#             (0 <= x1) * (x1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
-#             (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1) * (y1 < h),
-#             (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
-#         ],
-#         axis=-1,
-#     )
-#     w_pos0 = (1 - floor_to_xy[..., 0]) * (1 - floor_to_xy[..., 1]) * weight
-#     w_pos1 = floor_to_xy[..., 0] * (1 - floor_to_xy[..., 1]) * weight
-#     w_pos2 = (1 - floor_to_xy[..., 0]) * floor_to_xy[..., 1] * weight
-#     w_pos3 = floor_to_xy[..., 0] * floor_to_xy[..., 1] * weight
-#     vals = numpy.concatenate([w_pos0, w_pos1, w_pos2, w_pos3], axis=-1)
-#     inds = (inds * inds_mask).astype(numpy.int64)
-#     vals = vals * inds_mask
-#     for i in range(nb):
-#         numpy.add.at(image[i], inds[i], vals[i])
-#     return image.reshape((nb,) + self.image_size).squeeze()
+    x1 = floor_xy[..., 1] + pw
+    y1 = floor_xy[..., 0] + ph
+    inds = numpy.concatenate(
+        [
+            x1 + y1 * w,
+            x1 + (y1 + 1) * w,
+            (x1 + 1) + y1 * w,
+            (x1 + 1) + (y1 + 1) * w,
+        ],
+        axis=-1,
+    )
+    inds_mask = numpy.concatenate(
+        [
+            (0 <= x1) * (x1 < w) * (0 <= y1) * (y1 < h),
+            (0 <= x1) * (x1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
+            (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1) * (y1 < h),
+            (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
+        ],
+        axis=-1,
+    )
+    w_pos0 = (1 - floor_to_xy[..., 0]) * (1 - floor_to_xy[..., 1]) * weight
+    w_pos1 = floor_to_xy[..., 0] * (1 - floor_to_xy[..., 1]) * weight
+    w_pos2 = (1 - floor_to_xy[..., 0]) * floor_to_xy[..., 1] * weight
+    w_pos3 = floor_to_xy[..., 0] * floor_to_xy[..., 1] * weight
+    vals = numpy.concatenate([w_pos0, w_pos1, w_pos2, w_pos3], axis=-1)
+    inds = (inds * inds_mask).astype(numpy.int64)
+    vals = vals * inds_mask
+    for i in range(nb):
+        numpy.add.at(image[i], inds[i], vals[i])
+    return image.reshape((nb,) + self.image_size).squeeze()
 
-# def bilinear_vote_tensor(self, events: torch.Tensor, weight: FLOAT_TORCH = 1.0):
-#     """Tensor version of `bilinear_vote_numpy().`
+def bilinear_vote_tensor(self, events: torch.Tensor, weight: FLOAT_TORCH = 1.0):
+    """Tensor version of `bilinear_vote_numpy().`
 
-#     Args:
-#         events (torch.Tensor) ... [(b,) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
-#         weight (float or torch.Tensor) ... Weight to multiply to the voting value.
-#             If scalar, the weight is all the same among events.
-#             If it's array-like, it should be the shape of [(b,) n_events].
-#             Defaults to 1.0.
+    Args:
+        events (torch.Tensor) ... [(b,) n_events, 4] Batch of events. 4 is (x, y, t, p). Attention that (x, y) could float.
+        weight (float or torch.Tensor) ... Weight to multiply to the voting value.
+            If scalar, the weight is all the same among events.
+            If it's array-like, it should be the shape of [(b,) n_events].
+            Defaults to 1.0.
 
-#     Returns:
-#         image ... [(b,) H, W]. Each index indicates the bilinear vote result. If the outer_padding is set,
-#             the return size will be [H + outer_padding, W + outer_padding].
-#     """
-#     if type(weight) == torch.Tensor:
-#         assert weight.shape == events.shape[:-1]
-#     if len(events.shape) == 2:
-#         events = events[None, ...]  # 1 x n x 4
+    Returns:
+        image ... [(b,) H, W]. Each index indicates the bilinear vote result. If the outer_padding is set,
+            the return size will be [H + outer_padding, W + outer_padding].
+    """
+    if type(weight) == torch.Tensor:
+        assert weight.shape == events.shape[:-1]
+    if len(events.shape) == 2:
+        events = events[None, ...]  # 1 x n x 4
 
-#     ph, pw = self.outer_padding
-#     h, w = self.image_size
-#     nb = len(events)
-#     image = events.new_zeros((nb, h * w))
+    ph, pw = self.outer_padding
+    h, w = self.image_size
+    nb = len(events)
+    image = events.new_zeros((nb, h * w))
 
-#     floor_xy = torch.floor(events[..., :2] + 1e-6)
-#     floor_to_xy = events[..., :2] - floor_xy
-#     floor_xy = floor_xy.long()
+    floor_xy = torch.floor(events[..., :2] + 1e-6)
+    floor_to_xy = events[..., :2] - floor_xy
+    floor_xy = floor_xy.long()
 
-#     x1 = floor_xy[..., 1] + pw
-#     y1 = floor_xy[..., 0] + ph
-#     inds = torch.cat(
-#         [
-#             x1 + y1 * w,
-#             x1 + (y1 + 1) * w,
-#             (x1 + 1) + y1 * w,
-#             (x1 + 1) + (y1 + 1) * w,
-#         ],
-#         dim=-1,
-#     )  # [(b, ) n_events x 4]
-#     inds_mask = torch.cat(
-#         [
-#             (0 <= x1) * (x1 < w) * (0 <= y1) * (y1 < h),
-#             (0 <= x1) * (x1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
-#             (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1) * (y1 < h),
-#             (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
-#         ],
-#         axis=-1,
-#     )
+    x1 = floor_xy[..., 1] + pw
+    y1 = floor_xy[..., 0] + ph
+    inds = torch.cat(
+        [
+            x1 + y1 * w,
+            x1 + (y1 + 1) * w,
+            (x1 + 1) + y1 * w,
+            (x1 + 1) + (y1 + 1) * w,
+        ],
+        dim=-1,
+    )  # [(b, ) n_events x 4]
+    inds_mask = torch.cat(
+        [
+            (0 <= x1) * (x1 < w) * (0 <= y1) * (y1 < h),
+            (0 <= x1) * (x1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
+            (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1) * (y1 < h),
+            (0 <= x1 + 1) * (x1 + 1 < w) * (0 <= y1 + 1) * (y1 + 1 < h),
+        ],
+        axis=-1,
+    )
 
-#     w_pos0 = (1 - floor_to_xy[..., 0]) * (1 - floor_to_xy[..., 1]) * weight
-#     w_pos1 = floor_to_xy[..., 0] * (1 - floor_to_xy[..., 1]) * weight
-#     w_pos2 = (1 - floor_to_xy[..., 0]) * floor_to_xy[..., 1] * weight
-#     w_pos3 = floor_to_xy[..., 0] * floor_to_xy[..., 1] * weight
-#     vals = torch.cat([w_pos0, w_pos1, w_pos2, w_pos3], dim=-1)  # [(b,) n_events x 4]
+    w_pos0 = (1 - floor_to_xy[..., 0]) * (1 - floor_to_xy[..., 1]) * weight
+    w_pos1 = floor_to_xy[..., 0] * (1 - floor_to_xy[..., 1]) * weight
+    w_pos2 = (1 - floor_to_xy[..., 0]) * floor_to_xy[..., 1] * weight
+    w_pos3 = floor_to_xy[..., 0] * floor_to_xy[..., 1] * weight
+    vals = torch.cat([w_pos0, w_pos1, w_pos2, w_pos3], dim=-1)  # [(b,) n_events x 4]
 
-#     inds = (inds * inds_mask).long()
-#     vals = vals * inds_mask
-#     image.scatter_add_(1, inds, vals)
-#     return image.reshape((nb,) + self.image_size).squeeze()
+    inds = (inds * inds_mask).long()
+    vals = vals * inds_mask
+    image.scatter_add_(1, inds, vals)
+    return image.reshape((nb,) + self.image_size).squeeze()
 
 
 
@@ -5820,7 +5529,7 @@ def intensity_variance(
     events: numpy.ndarray,
     velocity: tuple[float, float],
 ):
-    return dvs_warping_package_extension.intensity_variance(  # type: ignore
+    return dvs_sparse_filter_extension.intensity_variance(  # type: ignore
         sensor_size[0],
         sensor_size[1],
         events["t"].astype("<f8"),
@@ -5837,7 +5546,7 @@ def intensity_variance_ts(
     velocity: tuple[float, float],
     tau: int,
 ):
-    return dvs_warping_package_extension.intensity_variance_ts(  # type: ignore
+    return dvs_sparse_filter_extension.intensity_variance_ts(  # type: ignore
         sensor_size[0],
         sensor_size[1],
         events["t"].astype("<f8"),
@@ -5898,137 +5607,137 @@ def warp_4D(events, linear_vel, angular_vel, zoom, deltat):
     return warpedx_trans, warpedy_trans
 
 
-# def opt_loss_py(events, linear_vel, angular_vel, zoom, deltat):
-#     warpedx, warpedy    = warp_4D(events, linear_vel, angular_vel, zoom, deltat)
-#     warped_image        = accumulate_warped_events_square(warpedx, warpedy)
-#     objective_func      = variance_loss_calculator(warped_image)
-#     save_img(warped_image, "./")
-#     return objective_func
+def opt_loss_py(events, linear_vel, angular_vel, zoom, deltat):
+    warpedx, warpedy    = warp_4D(events, linear_vel, angular_vel, zoom, deltat)
+    warped_image        = accumulate_warped_events_square(warpedx, warpedy)
+    objective_func      = variance_loss_calculator(warped_image)
+    save_img(warped_image, "./")
+    return objective_func
 
-# def opt_loss_cpp(events, sensor_size, linear_vel, angular_vel, zoom):
-#     # Convert events numpy array to a PyTorch tensor
-#     events_tensor = {}
-#     for key in events.dtype.names:
-#         if events[key].dtype == numpy.uint64:
-#             events_tensor[key] = torch.tensor(numpy.copy(events[key]).astype(numpy.int64)).to(linear_vel.device)
-#         elif events[key].dtype == numpy.uint16:
-#             events_tensor[key] = torch.tensor(numpy.copy(events[key]).astype(numpy.int32)).to(linear_vel.device)
-#         elif events[key].dtype == numpy.bool_:
-#             events_tensor[key] = torch.tensor(numpy.copy(events[key]).astype(numpy.int8)).to(linear_vel.device)
+def opt_loss_cpp(events, sensor_size, linear_vel, angular_vel, zoom):
+    # Convert events numpy array to a PyTorch tensor
+    events_tensor = {}
+    for key in events.dtype.names:
+        if events[key].dtype == numpy.uint64:
+            events_tensor[key] = torch.tensor(numpy.copy(events[key]).astype(numpy.int64)).to(linear_vel.device)
+        elif events[key].dtype == numpy.uint16:
+            events_tensor[key] = torch.tensor(numpy.copy(events[key]).astype(numpy.int32)).to(linear_vel.device)
+        elif events[key].dtype == numpy.bool_:
+            events_tensor[key] = torch.tensor(numpy.copy(events[key]).astype(numpy.int8)).to(linear_vel.device)
 
-#     warped_image = accumulate4D_torch(sensor_size=sensor_size,
-#                                 events=events_tensor,
-#                                 linear_vel=linear_vel,
-#                                 angular_vel=angular_vel,
-#                                 zoom=zoom)
+    warped_image = accumulate4D_torch(sensor_size=sensor_size,
+                                events=events_tensor,
+                                linear_vel=linear_vel,
+                                angular_vel=angular_vel,
+                                zoom=zoom)
 
-#     # Convert warped_image to a PyTorch tensor if it's not already one
-#     if not isinstance(warped_image, torch.Tensor):
-#         warped_image_tensor = torch.tensor(warped_image.pixels).float()
-#     else:
-#         warped_image_tensor = warped_image
+    # Convert warped_image to a PyTorch tensor if it's not already one
+    if not isinstance(warped_image, torch.Tensor):
+        warped_image_tensor = torch.tensor(warped_image.pixels).float()
+    else:
+        warped_image_tensor = warped_image
         
-#     objective_func = variance_loss_calculator_torch(warped_image_tensor)
-#     objective_func = objective_func.float()
-#     return objective_func
+    objective_func = variance_loss_calculator_torch(warped_image_tensor)
+    objective_func = objective_func.float()
+    return objective_func
 
 
-# def variance_loss_calculator_torch(evmap):
-#     flattening = evmap.view(-1)  # Flatten the tensor
-#     res = flattening[flattening != 0]
-#     return -torch.var(res)
+def variance_loss_calculator_torch(evmap):
+    flattening = evmap.view(-1)  # Flatten the tensor
+    res = flattening[flattening != 0]
+    return -torch.var(res)
 
-# def variance_loss_calculator(evmap):
-#     pixels = evmap
-#     flattening = pixels.flatten()
-#     res = flattening[flattening != 0]
-#     return torch.var(torch.from_numpy(res))
-
-
-# def save_img(warped_image, savefileto):
-#     image = render(
-#     warped_image,
-#     colormap_name="magma",
-#     gamma=lambda image: image ** (1 / 3))
-#     filename = "eventmap_wz.jpg"
-#     filepath = os.path.join(savefileto, filename)
-#     image.save(filepath)
-
-# def rad2degree(val):
-#     return val/numpy.pi*180.
-
-# def degree2rad(val):
-#     return val/180*numpy.pi
-
-# def generate_warped_images(events: numpy.ndarray,
-#                            sensor_size: Tuple[int, int],
-#                            linear_velocity: numpy.ndarray, 
-#                            angular_velocity: numpy.ndarray, 
-#                            scale: numpy.ndarray, 
-#                            tmax: float,
-#                            savefileto: str) -> None:
-
-#     for iVel in tqdm(range(len(linear_velocity))):
-#         linear          = linear_velocity[iVel]
-#         angular         = angular_velocity[iVel]
-#         zoom            = scale[iVel]
-#         vx              = -linear / 1e6
-#         vy              = -43 / 1e6
-#         wx              = 0.0 / 1e6
-#         wy              = 0.0 / 1e6
-#         wz              = (0.0 / tmax) / 1e6
-#         zooms           = (0.0 / tmax) / 1e6
-
-#         warped_image = accumulate4D(sensor_size=sensor_size,
-#                                     events=events,
-#                                     linear_vel=(vx,vy),
-#                                     angular_vel=(wx,wy,wz),
-#                                     zoom=zooms)
-
-#         image = render(warped_image,
-#                        colormap_name="magma",
-#                        gamma=lambda image: image ** (1 / 3))
-#         new_image = image.resize((500, 500))
-#         filename = f"eventmap_wz_{wz*1e6:.2f}_z_{zooms*1e6:.2f}_vx_{vx*1e6:.4f}_vy_{vy*1e6:.4f}_wx_{wx*1e6:.2f}_wy_{wy*1e6:.2f}.jpg"
-#         filepath = os.path.join(savefileto, filename)
-#         new_image.save(filepath)
-#     return None
+def variance_loss_calculator(evmap):
+    pixels = evmap
+    flattening = pixels.flatten()
+    res = flattening[flattening != 0]
+    return torch.var(torch.from_numpy(res))
 
 
-# def generate_3Dlandscape(events: numpy.ndarray,
-#                        sensor_size: Tuple[int, int],
-#                        linear_velocity: numpy.ndarray, 
-#                        angular_velocity: numpy.ndarray, 
-#                        scale: numpy.ndarray, 
-#                        tmax: float,
-#                        savefileto: str) -> None:
-#     nvel = len(angular_velocity)
-#     trans=0
-#     rot=0
-#     variance_loss = numpy.zeros((nvel*nvel,nvel))
-#     for iVelz in tqdm(range(nvel)):
-#         wx              = 0.0 / 1e6
-#         wy              = 0.0 / 1e6
-#         wz              = (angular_velocity[iVelz] / tmax) / 1e6
-#         for iVelx in range(nvel):
-#             vx          = linear_velocity[iVelx] / 1e6
-#             for iVely in range(nvel):
-#                 vy          = linear_velocity[iVely] / 1e6
-#                 warped_image = accumulate4D(sensor_size=sensor_size,
-#                                             events=events,
-#                                             linear_vel=(vx,vy),
-#                                             angular_vel=(wx,wy,wz),
-#                                             zoom=0)
-#                 var = variance_loss_calculator(warped_image.pixels)
-#                 variance_loss[trans,rot] = var
-#                 trans+=1
-#         rot+=1
-#         trans=0
+def save_img(warped_image, savefileto):
+    image = render(
+    warped_image,
+    colormap_name="magma",
+    gamma=lambda image: image ** (1 / 3))
+    filename = "eventmap_wz.jpg"
+    filepath = os.path.join(savefileto, filename)
+    image.save(filepath)
+
+def rad2degree(val):
+    return val/numpy.pi*180.
+
+def degree2rad(val):
+    return val/180*numpy.pi
+
+def generate_warped_images(events: numpy.ndarray,
+                           sensor_size: Tuple[int, int],
+                           linear_velocity: numpy.ndarray, 
+                           angular_velocity: numpy.ndarray, 
+                           scale: numpy.ndarray, 
+                           tmax: float,
+                           savefileto: str) -> None:
+
+    for iVel in tqdm(range(len(linear_velocity))):
+        linear          = linear_velocity[iVel]
+        angular         = angular_velocity[iVel]
+        zoom            = scale[iVel]
+        vx              = -linear / 1e6
+        vy              = -43 / 1e6
+        wx              = 0.0 / 1e6
+        wy              = 0.0 / 1e6
+        wz              = (0.0 / tmax) / 1e6
+        zooms           = (0.0 / tmax) / 1e6
+
+        warped_image = accumulate4D(sensor_size=sensor_size,
+                                    events=events,
+                                    linear_vel=(vx,vy),
+                                    angular_vel=(wx,wy,wz),
+                                    zoom=zooms)
+
+        image = render(warped_image,
+                       colormap_name="magma",
+                       gamma=lambda image: image ** (1 / 3))
+        new_image = image.resize((500, 500))
+        filename = f"eventmap_wz_{wz*1e6:.2f}_z_{zooms*1e6:.2f}_vx_{vx*1e6:.4f}_vy_{vy*1e6:.4f}_wx_{wx*1e6:.2f}_wy_{wy*1e6:.2f}.jpg"
+        filepath = os.path.join(savefileto, filename)
+        new_image.save(filepath)
+    return None
+
+
+def generate_3Dlandscape(events: numpy.ndarray,
+                       sensor_size: Tuple[int, int],
+                       linear_velocity: numpy.ndarray, 
+                       angular_velocity: numpy.ndarray, 
+                       scale: numpy.ndarray, 
+                       tmax: float,
+                       savefileto: str) -> None:
+    nvel = len(angular_velocity)
+    trans=0
+    rot=0
+    variance_loss = numpy.zeros((nvel*nvel,nvel))
+    for iVelz in tqdm(range(nvel)):
+        wx              = 0.0 / 1e6
+        wy              = 0.0 / 1e6
+        wz              = (angular_velocity[iVelz] / tmax) / 1e6
+        for iVelx in range(nvel):
+            vx          = linear_velocity[iVelx] / 1e6
+            for iVely in range(nvel):
+                vy          = linear_velocity[iVely] / 1e6
+                warped_image = accumulate4D(sensor_size=sensor_size,
+                                            events=events,
+                                            linear_vel=(vx,vy),
+                                            angular_vel=(wx,wy,wz),
+                                            zoom=0)
+                var = variance_loss_calculator(warped_image.pixels)
+                variance_loss[trans,rot] = var
+                trans+=1
+        rot+=1
+        trans=0
     
-#     reshaped_variance_loss = variance_loss.reshape(nvel, nvel, nvel)
-#     sio.savemat(savefileto+"reshaped_variance_loss.mat",{'reshaped_variance_loss':numpy.asarray(reshaped_variance_loss)})
-#     render_3d(reshaped_variance_loss)
-#     return None
+    reshaped_variance_loss = variance_loss.reshape(nvel, nvel, nvel)
+    sio.savemat(savefileto+"reshaped_variance_loss.mat",{'reshaped_variance_loss':numpy.asarray(reshaped_variance_loss)})
+    render_3d(reshaped_variance_loss)
+    return None
 
 
 def random_velocity(opt_range):
@@ -6154,7 +5863,7 @@ def calculate_patch_variance(sensor_size, events, x_start, y_start, window_size,
 
 
 
-def dvs_warping_package_alex_conv(events):
+def dvs_sparse_filter_alex_conv(events):
     x = events['x']
     y = events['y']
     x_max, y_max = x.max() + 1, y.max() + 1
@@ -6720,73 +6429,73 @@ def dvs_sliding_autofocus(events: numpy.ndarray,windowsize:int):
 ###########################################
 
 
-# def optimization(events, sensor_size, initial_linear_vel, initial_angular_vel, initial_zoom, max_iters, lr, lr_step, lr_decay):
-#     optimizer_name = 'Adam'
-#     optim_kwargs = dict()  # Initialize as empty dict by default
+def optimization(events, sensor_size, initial_linear_vel, initial_angular_vel, initial_zoom, max_iters, lr, lr_step, lr_decay):
+    optimizer_name = 'Adam'
+    optim_kwargs = dict()  # Initialize as empty dict by default
 
-#     # lr = 0.005
-#     # iters = 100
-#     lr_step = max(1, lr_step)  # Ensure lr_step is at least 1
+    # lr = 0.005
+    # iters = 100
+    lr_step = max(1, lr_step)  # Ensure lr_step is at least 1
 
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     # linear_vel = torch.tensor(initial_linear_vel).float().to(device)
-#     # linear_vel.requires_grad = True
-#     linear_vel = torch.tensor(initial_linear_vel, requires_grad=True)
-#     print(linear_vel.grad)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # linear_vel = torch.tensor(initial_linear_vel).float().to(device)
+    # linear_vel.requires_grad = True
+    linear_vel = torch.tensor(initial_linear_vel, requires_grad=True)
+    print(linear_vel.grad)
 
-#     optimizer = optim.__dict__[optimizer_name]([linear_vel], lr=lr, **optim_kwargs)
-#     scheduler = optim.lr_scheduler.StepLR(optimizer, lr_step, lr_decay)
+    optimizer = optim.__dict__[optimizer_name]([linear_vel], lr=lr, **optim_kwargs)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, lr_step, lr_decay)
 
-#     print_interval = 1
-#     min_loss = float('inf')  # Use Python's float infinity
-#     best_poses = linear_vel.clone()  # Clone to ensure we don't modify the original tensor
-#     best_it = 0
+    print_interval = 1
+    min_loss = float('inf')  # Use Python's float infinity
+    best_poses = linear_vel.clone()  # Clone to ensure we don't modify the original tensor
+    best_it = 0
 
-#     if optimizer_name == 'Adam':
-#         for it in range(max_iters):
-#             optimizer.zero_grad()
-#             poses_val = linear_vel.cpu().detach().numpy()
+    if optimizer_name == 'Adam':
+        for it in range(max_iters):
+            optimizer.zero_grad()
+            poses_val = linear_vel.cpu().detach().numpy()
             
-#             if numpy.isnan(poses_val).any():  # Proper way to check for NaN in numpy
-#                 print("nan in the estimated values, something wrong takes place, please check!")
-#                 exit()
+            if numpy.isnan(poses_val).any():  # Proper way to check for NaN in numpy
+                print("nan in the estimated values, something wrong takes place, please check!")
+                exit()
 
-#             # Use linear_vel directly in the loss computation
-#             loss = opt_loss_cpp(events, sensor_size, linear_vel, initial_angular_vel, initial_zoom)
+            # Use linear_vel directly in the loss computation
+            loss = opt_loss_cpp(events, sensor_size, linear_vel, initial_angular_vel, initial_zoom)
 
-#             if it == 0:
-#                 print('[Initial]\tloss: {:.12f}\tposes: {}'.format(loss.item(), poses_val))
-#             elif (it + 1) % print_interval == 0:
-#                 print('[Iter #{}/{}]\tloss: {:.12f}\tposes: {}'.format(it + 1, max_iters, loss.item(), poses_val))
+            if it == 0:
+                print('[Initial]\tloss: {:.12f}\tposes: {}'.format(loss.item(), poses_val))
+            elif (it + 1) % print_interval == 0:
+                print('[Iter #{}/{}]\tloss: {:.12f}\tposes: {}'.format(it + 1, max_iters, loss.item(), poses_val))
             
-#             # Store a copy of the best linear_vel tensor
-#             if loss < min_loss:
-#                 best_poses = linear_vel.clone()
-#                 min_loss = loss.item()
-#                 best_it = it
-#             try:
-#                 loss.requires_grad = True
-#                 optimizer.zero_grad()
-#                 loss.backward(retain_graph=True)
+            # Store a copy of the best linear_vel tensor
+            if loss < min_loss:
+                best_poses = linear_vel.clone()
+                min_loss = loss.item()
+                best_it = it
+            try:
+                loss.requires_grad = True
+                optimizer.zero_grad()
+                loss.backward(retain_graph=True)
 
                 
-#             except Exception as e:
-#                 print(e)
-#                 return poses_val, loss.item()
+            except Exception as e:
+                print(e)
+                return poses_val, loss.item()
             
-#             print("Loss before step:", loss.item())
-#             optimizer.step()
-#             print("Loss after step:", loss.item())
-#             scheduler.step()
-#     else:
-#         print("The optimizer is not supported.")
+            print("Loss before step:", loss.item())
+            optimizer.step()
+            print("Loss after step:", loss.item())
+            scheduler.step()
+    else:
+        print("The optimizer is not supported.")
 
-#     best_poses = best_poses.cpu().detach().numpy()
-#     print('[Final Result]\tloss: {:.12f}\tposes: {} @ {}'.format(min_loss, best_poses, best_it))
-#     if device == torch.device('cuda:0'):
-#         torch.cuda.empty_cache()
+    best_poses = best_poses.cpu().detach().numpy()
+    print('[Final Result]\tloss: {:.12f}\tposes: {} @ {}'.format(min_loss, best_poses, best_it))
+    if device == torch.device('cuda:0'):
+        torch.cuda.empty_cache()
     
-#     return best_poses, min_loss
+    return best_poses, min_loss
 
 
 def correction(i: numpy.ndarray, j: numpy.ndarray, x: numpy.ndarray, y: numpy.ndarray, vx: int, vy: int, width: int, height: int):
@@ -6948,7 +6657,7 @@ def intensity_maximum(
     events: numpy.ndarray,
     velocity: tuple[float, float],
 ):
-    return dvs_warping_package_extension.intensity_maximum(  # type: ignore
+    return dvs_sparse_filter_extension.intensity_maximum(  # type: ignore
         sensor_size[0],
         sensor_size[1],
         events["t"].astype("<f8"),

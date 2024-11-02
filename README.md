@@ -19,7 +19,9 @@ conda env create -f environment.yml
 python3 -m pip install -e .
 ```
 
+## Use
 
+In progress
 
 <!-- # DiffuserCam-Tutorial
 #### See our [full tutorial](https://waller-lab.github.io/DiffuserCam/tutorial) for complete guides on setting up the DiffuserCam hardware and installing and running the software.
