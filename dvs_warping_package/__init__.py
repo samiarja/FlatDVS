@@ -44,7 +44,7 @@ from sklearn.neighbors import kneighbors_graph
 from sklearn.cluster import SpectralClustering
 # import hdbscan
 from sklearn.cluster import DBSCAN
-from typing import Tuple, List
+from typing import Tuple, List, Union
 from tqdm import tqdm
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.cm
@@ -58,7 +58,12 @@ from math import exp, isfinite
 from scipy.linalg import expm, lstsq
 from collections import deque
 import configparser
-
+import sys
+import subprocess
+import shutil
+from pathlib import Path
+sys.path.append("/home/samiarja/Desktop/PhD/Code/FlatDVS/src/")
+from dat_files import load_dat_event
 # # from torchvision.transforms.functional import gaussian_blur
 # # import cache
 # # import stars
@@ -415,6 +420,54 @@ def calculate_time_constants(photon_flux_density, quantum_efficiency, electron_c
     
     return tau
     
+    
+    
+def read_dat_file(path: Union[pathlib.Path, str]) -> Tuple[int, int, numpy.ndarray]:
+    ts, x, y, p = load_dat_event(path)
+    width, height = max(x)+1, max(y)+1 
+    events = numpy.zeros(ts.shape[0], dtype=[('t', '<u8'), 
+                                          ('x', '<u2'), 
+                                          ('y', '<u2'), 
+                                          (('on', 'p'), '?')])
+    events['t'] = ts
+    events['x'] = x
+    events['y'] = y
+    events['on'] = p.astype(bool)
+    events['t'] = events['t'] - events['t'][0]
+    # write_es_file(path,"dvs",width,height,events)
+    
+    return width, height, events
+
+
+def process_raw_to_dat(input_directory: str, output_directory: str, recordingname: str):
+    # Define paths for the .raw and expected .dat files
+    raw_path = os.path.join(input_directory, f"{recordingname}.raw")
+    dat_path = os.path.join(output_directory, f"{recordingname}_cd.dat")
+    
+    # Check if .dat file already exists
+    if Path(dat_path).exists():
+        print(f"{dat_path} already exists. Skipping conversion.")
+    else:
+        # Run the conversion command if .dat file does not exist
+        try:
+            subprocess.run(["metavision_file_to_dat", "-i", raw_path], check=True)
+            print(f"Conversion successful: {recordingname}.raw has been converted to .dat format.")
+        except subprocess.CalledProcessError:
+            print(f"Error occurred while converting {recordingname}.raw to .dat format.")
+            return
+
+        # Move the generated .dat file with _cd suffix to the output directory
+        generated_dat_path = os.path.join(input_directory, f"{recordingname}_cd.dat")
+        if os.path.exists(generated_dat_path):
+            shutil.move(generated_dat_path, dat_path)
+            print(f"Moved and renamed {generated_dat_path} to {dat_path}")
+        else:
+            print(f"{generated_dat_path} was not found in the recordings directory after conversion.")
+            return
+        
+        
+        
+
 def read_es_file(
     path: typing.Union[pathlib.Path, str]
 ) -> tuple[int, int, numpy.ndarray]:
