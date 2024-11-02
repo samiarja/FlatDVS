@@ -13,21 +13,10 @@
 ## Installation
 
 ```sh
-conda create -n flatdvs python=3.9
-conda activate flatdvs
 git clone https://github.com/samiarja/FlatDVS.git
 cd FlatDVS
+conda env create -f environment.yml
 python3 -m pip install -e .
-pip install tqdm
-pip install plotly
-pip install scikit-image
-pip install loris
-pip install PyYAML
-pip install opencv-python
-pip install scikit-learn
-pip install pillow
-pip install astropy
-pip install configparser
 ```
 
 
