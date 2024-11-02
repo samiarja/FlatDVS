@@ -1,4 +1,38 @@
-# DiffuserCam-Tutorial
+# FlatDVS: A Lensless Event Camera
+
+
+## Requirements
+
+- python: 3.9.x, 3.10.x
+
+## Tested environments
+- Ubuntu 22.04
+- Conda 23.1.0
+- Python 3.9.18
+
+## Installation
+
+```sh
+conda create -n flatdvs python=3.9
+conda activate flatdvs
+git clone https://github.com/samiarja/FlatDVS.git
+cd FlatDVS
+python3 -m pip install -e .
+pip install tqdm
+pip install plotly
+pip install scikit-image
+pip install loris
+pip install PyYAML
+pip install opencv-python
+pip install scikit-learn
+pip install pillow
+pip install astropy
+pip install configparser
+```
+
+
+
+<!-- # DiffuserCam-Tutorial
 #### See our [full tutorial](https://waller-lab.github.io/DiffuserCam/tutorial) for complete guides on setting up the DiffuserCam hardware and installing and running the software.
 Below is an overview of the organization of this repo.
 <br><br>
@@ -15,4 +49,4 @@ This folder contains iPython notebooks that walk the user step-by-step through t
 #### Test_Images Folder
 This folder contains sample images that you can place on a phone or laptop screen for testing your Raspberry Pi DiffuserCam. We recommend you start with `sprial_bw.gif`.
 
-
+ -->
