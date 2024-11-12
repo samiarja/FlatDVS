@@ -64,6 +64,8 @@ import shutil
 from pathlib import Path
 sys.path.append("/home/samiarja/Desktop/PhD/Code/FlatDVS/src/")
 from dat_files import load_dat_event
+
+
 # # from torchvision.transforms.functional import gaussian_blur
 # # import cache
 # # import stars
@@ -419,9 +421,9 @@ def calculate_time_constants(photon_flux_density, quantum_efficiency, electron_c
     tau = numpy.where(tau_sf > tau_pr, tau_pr, tau_sf)
     
     return tau
-    
-    
-    
+
+
+
 def read_dat_file(path: Union[pathlib.Path, str]) -> Tuple[int, int, numpy.ndarray]:
     ts, x, y, p = load_dat_event(path)
     width, height = max(x)+1, max(y)+1 
@@ -1568,7 +1570,10 @@ def STCF(input_events, ground_truth, time_window):
 
     print(f'Number of input event: {len(input_events["x"])}')
 
-    filter_instance             = SpatioTemporalCorrelationFilter(size_x=x_max, size_y=y_max, num_must_be_correlated=2, shot_noise_correlation_time_s=0.1)
+    filter_instance             = SpatioTemporalCorrelationFilter(size_x=x_max, 
+                                                                  size_y=y_max, 
+                                                                  num_must_be_correlated=2, 
+                                                                  shot_noise_correlation_time_s=0.1)
     boolean_mask, output_events = filter_instance.filter_packet(input_events)
 
     print(f'Number of detected noise event: {len(input_events) - len(output_events)}')
